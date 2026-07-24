@@ -306,7 +306,10 @@ type node struct {
 	stop       chan struct{}
 	status     chan chan Status
 
-	rn *RawNode
+	rn                 *RawNode
+	id                 uint64
+	logger             Logger
+	asyncStorageWrites bool
 }
 
 func newNode(rn *RawNode) node {
@@ -320,11 +323,14 @@ func newNode(rn *RawNode) node {
 		// make tickc a buffered chan, so raft node can buffer some ticks when the node
 		// is busy processing raft messages. Raft node will resume process buffered
 		// ticks when it becomes idle.
-		tickc:  make(chan struct{}, 128),
-		done:   make(chan struct{}),
-		stop:   make(chan struct{}),
-		status: make(chan chan Status),
-		rn:     rn,
+		tickc:              make(chan struct{}, 128),
+		done:               make(chan struct{}),
+		stop:               make(chan struct{}),
+		status:             make(chan chan Status),
+		rn:                 rn,
+		id:                 rn.ID(),
+		logger:             rn.Logger(),
+		asyncStorageWrites: rn.AsyncStorageWritesEnabled(),
 	}
 }
 
@@ -346,8 +352,6 @@ func (n *node) run() {
 	var advancec chan struct{}
 	var rd Ready
 
-	r := n.rn.raft
-
 	lead := None
 
 	for {
@@ -364,19 +368,20 @@ func (n *node) run() {
 			readyc = n.readyc
 		}
 
-		if lead != r.lead {
-			if r.hasLeader() {
+		basicStatus := n.rn.BasicStatus()
+		if lead != basicStatus.Lead {
+			if basicStatus.Lead != None {
 				if lead == None {
-					r.logger.Infof("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
+					n.logger.Infof("raft.node: %x elected leader %x at term %d", n.id, basicStatus.Lead, basicStatus.GetTerm())
 				} else {
-					r.logger.Infof("raft.node: %x changed leader from %x to %x at term %d", r.id, lead, r.lead, r.Term)
+					n.logger.Infof("raft.node: %x changed leader from %x to %x at term %d", n.id, lead, basicStatus.Lead, basicStatus.GetTerm())
 				}
 				propc = n.propc
 			} else {
-				r.logger.Infof("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
+				n.logger.Infof("raft.node: %x lost leader %x at term %d", n.id, lead, basicStatus.GetTerm())
 				propc = nil
 			}
-			lead = r.lead
+			lead = basicStatus.Lead
 		}
 
 		select {
@@ -385,21 +390,20 @@ func (n *node) run() {
 		// Currently it is dropped in Step silently.
 		case pm := <-propc:
 			m := pm.m
-			m.From = new(r.id)
-			err := r.Step(m)
+			m.From = new(n.id)
+			err := n.rn.stepForNode(m)
 			if pm.result != nil {
 				pm.result <- err
 				close(pm.result)
 			}
 		case m := <-n.recvc:
-			if IsResponseMsg(m.GetType()) && !IsLocalMsgTarget(m.GetFrom()) && r.trk.Progress[m.GetFrom()] == nil {
-				// Filter out response message from unknown From.
-				break
-			}
-			r.Step(m)
+			// Unknown-peer responses are filtered by RawNode. Other errors are
+			// intentionally ignored because this asynchronous path has no result
+			// channel through which to return them.
+			_ = n.rn.stepForNode(m)
 		case cc := <-n.confc:
-			_, okBefore := r.trk.Progress[r.id]
-			cs := r.applyConfChange(cc)
+			okBefore := n.rn.HasProgress(n.id)
+			cs := n.rn.ApplyConfChange(cc)
 			// If the node was removed, block incoming proposals. Note that we
 			// only do this if the node was in the config before. Nodes may be
 			// a member of the group without knowing this (when they're catching
@@ -409,11 +413,11 @@ func (n *node) run() {
 			// NB: propc is reset when the leader changes, which, if we learn
 			// about it, sort of implies that we got readded, maybe? This isn't
 			// very sound and likely has bugs.
-			if _, okAfter := r.trk.Progress[r.id]; okBefore && !okAfter {
+			if okAfter := n.rn.HasProgress(n.id); okBefore && !okAfter {
 				var found bool
 				for _, sl := range [][]uint64{cs.Voters, cs.VotersOutgoing} {
 					for _, id := range sl {
-						if id == r.id {
+						if id == n.id {
 							found = true
 							break
 						}
@@ -434,7 +438,7 @@ func (n *node) run() {
 			n.rn.Tick()
 		case readyc <- rd:
 			n.rn.acceptReady(rd)
-			if !n.rn.asyncStorageWrites {
+			if !n.asyncStorageWrites {
 				advancec = n.advancec
 			} else {
 				rd = Ready{}
@@ -445,7 +449,7 @@ func (n *node) run() {
 			rd = Ready{}
 			advancec = nil
 		case c := <-n.status:
-			c <- getStatus(r)
+			c <- n.rn.Status()
 		case <-n.stop:
 			close(n.done)
 			return
@@ -460,7 +464,7 @@ func (n *node) Tick() {
 	case n.tickc <- struct{}{}:
 	case <-n.done:
 	default:
-		n.rn.raft.logger.Warningf("%x A tick missed to fire. Node blocks too long!", n.rn.raft.id)
+		n.logger.Warningf("%x A tick missed to fire. Node blocks too long!", n.id)
 	}
 }
 

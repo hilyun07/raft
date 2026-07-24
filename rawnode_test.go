@@ -103,6 +103,22 @@ func TestRawNodeStep(t *testing.T) {
 	}
 }
 
+func TestRawNodeBoundaryGetters(t *testing.T) {
+	cfg := newTestConfig(1, 10, 1, newTestMemoryStorage(withPeers(1)))
+	cfg.AsyncStorageWrites = true
+	cfg.Logger = discardLogger
+	rn, err := NewRawNode(cfg)
+	require.NoError(t, err)
+
+	before := rn.BasicStatus()
+	assert.Equal(t, uint64(1), rn.ID())
+	assert.True(t, rn.HasProgress(1))
+	assert.False(t, rn.HasProgress(2))
+	assert.True(t, rn.AsyncStorageWritesEnabled())
+	assert.Same(t, discardLogger, rn.Logger())
+	assert.Equal(t, before, rn.BasicStatus())
+}
+
 // TestNodeStepUnblock from node_test.go has no equivalent in rawNode because there is
 // no goroutine in RawNode.
 

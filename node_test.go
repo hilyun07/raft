@@ -40,7 +40,7 @@ func readyWithTimeout(n Node) Ready {
 			n = nn.node
 		}
 		if nn, ok := n.(*node); ok {
-			nn.rn.raft.logger.Infof("emitted ready: %s", DescribeReady(rd, nil))
+			nn.logger.Infof("emitted ready: %s", DescribeReady(rd, nil))
 		}
 		return rd
 	case <-time.After(time.Second):
@@ -125,6 +125,23 @@ func TestNodeStepUnblock(t *testing.T) {
 			t.Fatalf("#%d: failed to unblock step", i)
 		}
 	}
+}
+
+func TestNodeIgnoresResponseFromUnknownPeer(t *testing.T) {
+	rn := newTestRawNode(1, 10, 1, newTestMemoryStorage(withPeers(1)))
+	n := newNode(rn)
+	go n.run()
+	defer n.Stop()
+
+	before := n.Status()
+	require.NoError(t, n.Step(t.Context(), &raftpb.Message{
+		Type: raftpb.MsgAppResp.Enum(),
+		From: new(uint64(2)),
+		To:   new(uint64(1)),
+		Term: new(before.GetTerm() + 10),
+	}))
+	after := n.Status()
+	assert.Equal(t, before.BasicStatus, after.BasicStatus)
 }
 
 // TestNodePropose ensures that node.Propose sends the given proposal to the underlying raft.
@@ -382,6 +399,27 @@ func TestBlockProposal(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Errorf("blocking proposal, want unblocking")
 	}
+}
+
+func TestBlockProposalAfterSelfRemoval(t *testing.T) {
+	rn := newTestRawNode(1, 10, 1, newTestMemoryStorage(withPeers(1, 2)))
+	rn.raft.becomeCandidate()
+	rn.raft.becomeLeader()
+	n := newNode(rn)
+	go n.run()
+	defer n.Stop()
+
+	require.Equal(t, uint64(1), n.Status().Lead)
+	cs := n.ApplyConfChange(&raftpb.ConfChange{
+		Type:   raftpb.ConfChangeRemoveNode.Enum(),
+		NodeId: new(uint64(1)),
+	})
+	require.Equal(t, []uint64{2}, cs.Voters)
+	require.Empty(t, cs.VotersOutgoing)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	assert.ErrorIs(t, n.Propose(ctx, []byte("blocked")), context.DeadlineExceeded)
 }
 
 func TestNodeProposeWaitDropped(t *testing.T) {
