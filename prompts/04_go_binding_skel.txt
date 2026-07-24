@@ -1,0 +1,76 @@
+Read RAFT_C_PORTING_SPEC.md, PORTING_BASELINE.md, PHASE1_RAWNODE_BOUNDARY_RESULT.md, and PHASE2_C_RAWNODE_SKELETON_RESULT.md.
+
+Now implement Phase 3 only: add the Go RawNode binding skeleton for the C RawNode API.
+
+Goal:
+Create a Go `RawNode` binding layer that can wrap `*C.raft_raw_node_t`, but do not switch the default Go raft implementation to C yet unless the build tag explicitly enables it.
+
+Requirements:
+
+1. Preserve the existing pure-Go implementation as the default.
+2. Add a build-tagged C-backed RawNode binding, for example behind a tag such as `crawnode` or `cgo_raft`.
+3. The Go C-backed `RawNode` should conceptually have this shape:
+
+```go
+type RawNode struct {
+    p *C.raft_raw_node_t
+
+    storageHandle cgo.Handle
+    loggerHandle  cgo.Handle // optional
+    traceHandle   cgo.Handle // optional
+}
+```
+
+4. Do not store raw Go pointers in C memory.
+5. Use `runtime/cgo.Handle` for Go objects referenced by C callbacks.
+6. Implement Go wrapper methods corresponding to the C API skeleton:
+
+   * `Tick`
+   * `Campaign`
+   * `Propose`
+   * `ProposeConfChange`
+   * `Step`
+   * `HasReady`
+   * `Ready`
+   * `Advance`
+   * `ApplyConfChange`
+   * `ReadIndex`
+   * `ReportUnreachable`
+   * `ReportSnapshot`
+   * `Status`
+   * any Node-needed getters introduced in Phase 1.
+7. The methods may call C skeleton functions that return “not implemented” for now, but the Go/C call path must compile.
+8. Add conversion skeletons for:
+
+   * Go `raftpb.Message` <-> C `raft_message_t`
+   * Go `raftpb.Entry` <-> C `raft_entry_t`
+   * Go `raftpb.Snapshot` <-> C `raft_snapshot_t`
+   * Go `Ready` <-> C `raft_ready_t`
+   * Go `SoftState`, `HardState`, `ConfState`, `Status` <-> C equivalents
+9. For now, conversion functions may be partial if the C backend is not used by default, but they must be structured so ownership is explicit.
+10. Add C free calls after converting C-owned structures into Go-owned structures.
+11. Add Go error conversion from C error enum to existing Go errors where possible.
+12. Add panic guards to exported Go callback skeletons.
+13. Add Storage callback bridge skeletons, but do not fully implement complex `Entries`/`Snapshot` copying unless this phase can do so safely.
+14. Do not change etcd-facing `Node` API.
+15. Do not alter normal pure-Go test behavior.
+16. Add build instructions for the new tag.
+17. Run:
+
+    * default `go test ./...`
+    * build-tagged compile check if possible, e.g. `go test -tags crawnode ./...`
+18. Produce PHASE3_GO_RAWNODE_BINDING_RESULT.md summarizing:
+
+    * files added/changed,
+    * build tags used,
+    * Go RawNode methods mapped to C functions,
+    * implemented vs stubbed conversions,
+    * storage callback bridge status,
+    * memory ownership decisions,
+    * test/build results,
+    * next recommended phase.
+19. Git add and commit what you have done.
+
+Important:
+This phase is about establishing the Go/C binding boundary. Do not port the full Raft algorithm yet. Do not make the C backend the default implementation yet.
+

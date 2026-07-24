@@ -1,0 +1,75 @@
+iRead RAFT_C_PORTING_SPEC.md, PORTING_BASELINE.md, PHASE1_RAWNODE_BOUNDARY_PLAN.md, and PHASE1_RAWNODE_BOUNDARY_RESULT.md.
+
+Now implement Phase 2 only: add the C RawNode public API skeleton.
+
+Goal:
+Create the C API boundary for a future C-backed RawNode implementation. Do not port the full Raft algorithm yet.
+
+Requirements:
+
+1. Add C public/private headers and C source skeletons for an opaque `raft_raw_node_t`.
+2. Do not expose the internal layout of `raft_raw_node_t` in the public header.
+3. Define C error codes for:
+
+   * OK,
+   * compacted,
+   * unavailable,
+   * snapshot temporarily unavailable,
+   * proposal dropped,
+   * stopped,
+   * local message error,
+   * storage error,
+   * panic/fatal error,
+   * invalid argument.
+4. Define C-facing types or placeholders for:
+
+   * config,
+   * message,
+   * entry,
+   * snapshot,
+   * ready,
+   * soft state,
+   * hard state,
+   * conf state,
+   * status,
+   * storage ops.
+5. Add explicit free functions for C-owned allocated structures, even if currently no-op.
+6. Add skeleton functions for:
+
+   * `raft_raw_node_new`,
+   * `raft_raw_node_destroy`,
+   * `raft_raw_node_tick`,
+   * `raft_raw_node_campaign`,
+   * `raft_raw_node_propose`,
+   * `raft_raw_node_propose_conf_change`,
+   * `raft_raw_node_step`,
+   * `raft_raw_node_has_ready`,
+   * `raft_raw_node_ready`,
+   * `raft_raw_node_advance`,
+   * `raft_raw_node_apply_conf_change`,
+   * `raft_raw_node_read_index`,
+   * `raft_raw_node_report_unreachable`,
+   * `raft_raw_node_report_snapshot`,
+   * `raft_raw_node_status`.
+7. If needed by the Go Node layer design, add skeletons for:
+
+   * `raft_raw_node_ready_without_accept`,
+   * `raft_raw_node_accept_ready`.
+8. Add a minimal build integration so the C code compiles in the repository, but do not rewire the Go RawNode to use it yet unless absolutely necessary.
+9. Do not change existing Go Raft behavior in this phase.
+10. Do not add consensus logic yet.
+11. Do not implement Storage callback bridge yet; only define the `raft_storage_ops_t` ABI shape.
+12. Run existing tests after adding the skeleton.
+13. Produce PHASE2_C_RAWNODE_SKELETON_RESULT.md summarizing:
+
+    * files added,
+    * public C API defined,
+    * private/internal C structures defined,
+    * build integration approach,
+    * test results,
+    * any unresolved design questions.
+14. Git add and commit what you have done.
+
+Important:
+This phase should be a compile-safe API skeleton only. Preserve all existing Go behavior.
+

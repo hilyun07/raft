@@ -1,0 +1,145 @@
+Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
+
+Now implement Phase 10 only: port leadership-control and election-stability features to C.
+
+Goal:
+Complete the C RawNode behavior for leadership transfer, PreVote, CheckQuorum, quorum activity checks, and ForgetLeader so that the C-backed implementation matches the Go implementation for operational leader-control paths.
+
+This phase builds on:
+
+* C raft core,
+* C log subsystem,
+* C progress tracker/quorum,
+* C snapshot behavior,
+* C ReadIndex path,
+* C Ready/Advance handling.
+
+Scope:
+
+1. Port or complete PreVote behavior.
+   Match the Go implementation for:
+
+   * pre-candidate state,
+   * `MsgPreVote`,
+   * `MsgPreVoteResp`,
+   * term handling during pre-vote,
+   * transition from pre-candidate to candidate,
+   * rejection behavior for stale logs,
+   * interaction with existing leader.
+
+2. Port or complete CheckQuorum behavior.
+   Match the Go implementation for:
+
+   * quorum activity tracking,
+   * leader stepping down when quorum is inactive,
+   * follower behavior when leader is lost,
+   * election timeout interactions,
+   * heartbeat response activity marking.
+
+3. Port leadership transfer.
+   Implement behavior for:
+
+   * `raft_raw_node_transfer_leadership`,
+   * `MsgTransferLeader`,
+   * `MsgTimeoutNow`,
+   * leader transfer target selection,
+   * transferee log catch-up before transfer,
+   * aborting transfer when appropriate,
+   * transfer timeout,
+   * step-down/election behavior of transferee.
+
+4. Port ForgetLeader.
+   Implement behavior for:
+
+   * `raft_raw_node_forget_leader`,
+   * follower forgetting current leader,
+   * interaction with PreVote and CheckQuorum,
+   * preserving the Go implementation’s restrictions,
+   * preserving behavior under `ReadOnlyLeaseBased` if applicable.
+
+5. Preserve safety and liveness assumptions.
+
+   * PreVote must not increment term unnecessarily.
+   * CheckQuorum must not create unsafe read behavior.
+   * Leadership transfer must not commit unreplicated entries unsafely.
+   * ForgetLeader must not be used as a unilateral unsafe leader disruption mechanism.
+   * Match existing Go behavior rather than inventing simplified rules.
+
+6. Update C public API if needed.
+   Add or complete:
+
+   * `raft_raw_node_transfer_leadership`;
+   * `raft_raw_node_forget_leader`;
+   * any status/getter fields required to observe transfer state.
+
+7. Update Go RawNode binding.
+   Map Go methods to C functions:
+
+   * `TransferLeader` / `TransferLeadership`, depending on current Go naming;
+   * `ForgetLeader`;
+   * any status fields needed by Go `Node`.
+
+8. Preserve Node API compatibility.
+   Existing Go `Node.TransferLeadership(ctx, lead, transferee)` and `Node.ForgetLeader(ctx)` behavior should remain compatible.
+   Context cancellation / stopped-node behavior should remain handled in the Go `Node` layer.
+
+9. Tests:
+   Add C-backed tests for:
+
+   * PreVote prevents disruptive stale candidate;
+   * PreVote succeeds when quorum would elect the node;
+   * candidate becomes leader after successful pre-vote and vote;
+   * CheckQuorum leader steps down after quorum inactivity;
+   * leader does not step down when quorum is active;
+   * heartbeat responses mark peers active;
+   * leadership transfer to up-to-date follower;
+   * leadership transfer to lagging follower after catch-up;
+   * leadership transfer timeout/abort;
+   * `MsgTimeoutNow` handling;
+   * ForgetLeader on follower;
+   * ForgetLeader with PreVote + CheckQuorum;
+   * ForgetLeader rejected or no-op under unsupported read-only mode if Go does so.
+
+10. Differential testing:
+    Where practical, run identical scripted scenarios against:
+
+    * pure-Go RawNode,
+    * C-backed RawNode,
+      and compare:
+    * term,
+    * leader,
+    * state,
+    * outgoing messages,
+    * transfer target,
+    * progress state,
+    * Ready outputs.
+
+11. Default behavior:
+
+    * The default pure-Go raft implementation must remain unchanged.
+    * The C-backed implementation remains behind the selected build tag.
+    * Existing default `go test ./...` must pass.
+
+12. Build-tagged validation:
+    Run:
+
+    * default `go test ./...`,
+    * C-backed tests, for example `go test -tags crawnode ./...`,
+    * any C unit tests added for this phase.
+
+13. Produce PHASE10_C_LEADERSHIP_CONTROL_RESULT.md summarizing:
+
+    * files changed,
+    * PreVote status,
+    * CheckQuorum status,
+    * leadership transfer status,
+    * ForgetLeader status,
+    * Go binding updates,
+    * tests added,
+    * differential test results,
+    * known deviations from Go behavior,
+    * next recommended phase.
+
+Important:
+Do not simplify these features by weakening their safety/liveness semantics. These paths are subtle. Prefer matching the current Go implementation exactly.
+

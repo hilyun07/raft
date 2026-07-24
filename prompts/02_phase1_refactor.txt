@@ -1,0 +1,38 @@
+Read RAFT_C_PORTING_SPEC.md, PORTING_BASELINE.md, and PHASE1_RAWNODE_BOUNDARY_PLAN.md.
+
+Now implement Phase 1 only.
+
+Goal:
+Refactor the Go Node/RawNode boundary so node.go/node.run no longer directly accesses rn.raft or raft internals. Do not add C code yet.
+
+Requirements:
+1. Preserve all existing public Go APIs.
+2. Preserve existing semantics.
+3. Keep RawNode implemented in Go for now.
+4. Add the minimal RawNode methods/getters needed by node.run.
+5. Replace direct rn.raft field/method access in node.go with RawNode methods.
+6. Do not move consensus logic into node.go.
+7. Do not change Ready/Advance semantics.
+8. Do not change Storage, transport, or protobuf APIs.
+9. Run go test ./... after the change.
+10. Produce PHASE1_RAWNODE_BOUNDARY_RESULT.md summarizing:
+   - files changed,
+   - direct rn.raft accesses removed,
+   - new RawNode methods/getters added,
+   - any remaining internal coupling,
+   - test results.
+11. Git add and commit what you have done.
+
+Important:
+This phase is only a Go-only boundary refactor. Do not introduce cgo, C headers, C source files, or build tags yet.
+
+Before implementing, verify:
+- PORTING_BASELINE.md exists.
+- PHASE1_RAWNODE_BOUNDARY_PLAN.md exists.
+- The plan identifies every direct rn.raft access in node.go.
+- The plan proposes only a Go-only refactor.
+- No C code, cgo, headers, or build tags are introduced in this phase.
+
+If any condition is not satisfied, stop and write BLOCKED_PHASE1.md explaining why.
+
+If all conditions are satisfied, implement Phase 1 only.

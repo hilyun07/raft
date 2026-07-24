@@ -1,0 +1,156 @@
+Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
+
+Now implement Phase 8 only: port snapshot send/restore and compaction-related behavior to C.
+
+Goal:
+Complete the C RawNode snapshot path so that lagging followers can be caught up through snapshots, compacted logs are handled correctly, and Ready.Snapshot / MsgSnap semantics match the Go implementation.
+
+This phase builds on:
+
+* C log subsystem,
+* C core Raft state machine,
+* C progress tracker,
+* C quorum/confchange logic,
+* Go Storage callback bridge.
+
+Scope:
+
+1. Port or implement snapshot-related raft core behavior:
+
+   * detect when append entries cannot be sent because required log entries/terms are compacted or unavailable;
+   * call `Storage.Snapshot()` through the C storage callback ABI;
+   * create outbound `MsgSnap`;
+   * update follower progress to snapshot state;
+   * handle snapshot success/failure reports;
+   * restore local raft state from incoming snapshot;
+   * expose incoming snapshots through `Ready.Snapshot`;
+   * update log first index / last index / committed / applied boundaries correctly.
+
+2. Preserve Go semantics for:
+
+   * `raftLog.snapshot`;
+   * `maybeSendSnapshot`;
+   * `handleSnapshot`;
+   * `restore`;
+   * `ReportSnapshot`;
+   * `SnapshotFinish`;
+   * `SnapshotFailure`;
+   * `ErrSnapshotTemporarilyUnavailable`;
+   * compacted log behavior;
+   * snapshot metadata index/term/confState.
+
+3. Preserve the distinction between:
+
+   * local `Ready.Snapshot`: snapshot that the local application must save/apply;
+   * outbound `MsgSnap` in `Ready.Messages`: snapshot message that must be transported to another peer.
+
+4. Preserve application responsibilities:
+
+   * non-empty `Ready.Snapshot` must be saved and applied by the application;
+   * outbound `MsgSnap` must be sent through snapshot transport;
+   * snapshot send failure must be reported with `ReportSnapshot(id, SnapshotFailure)`;
+   * successful snapshot send may be reported with `ReportSnapshot(id, SnapshotFinish)`;
+   * `Snapshot.Data` is opaque application data;
+   * `Snapshot.Metadata` must contain correct index, term, and ConfState.
+
+5. Implement compaction-aware behavior:
+
+   * if log entries are compacted, use snapshot path when appropriate;
+   * do not access entries below `FirstIndex`;
+   * return/propagate compacted and unavailable errors correctly;
+   * preserve behavior at snapshot boundary index and term;
+   * ensure `Storage.FirstIndex`, `Storage.LastIndex`, `Storage.Term`, `Storage.Entries`, and `Storage.Snapshot` remain consistent.
+
+6. Progress tracker integration:
+
+   * when sending snapshot, mark follower progress as snapshot/probe state according to Go semantics;
+   * on snapshot failure, resume probing as in Go implementation;
+   * on snapshot success, update or clear snapshot state as appropriate;
+   * do not leave follower permanently stuck in snapshot state.
+
+7. Ready/Advance integration:
+
+   * outbound `MsgSnap` must appear in `Ready.Messages`;
+   * incoming accepted snapshot must appear in `Ready.Snapshot`;
+   * unstable snapshot must not be treated as persisted until Ready/Advance semantics allow it;
+   * snapshot-related `MustSync` and persistence behavior must match Go semantics.
+
+8. Memory ownership:
+
+   * snapshot data returned from Go Storage must be deep-copied into C-owned memory if retained by C;
+   * C-created snapshot messages must be converted to Go-owned protobuf messages before being returned to Go application code;
+   * provide and use explicit free functions for C-owned snapshots and messages;
+   * avoid retaining Go-owned `Snapshot.Data` or `ConfState` pointers in C.
+
+9. Tests:
+   Add C-backed tests for:
+
+   * leader sends snapshot when follower is behind compacted log;
+   * `Storage.Snapshot()` temporarily unavailable prevents snapshot send and retries later;
+   * outbound `MsgSnap` appears in Ready.Messages;
+   * `ReportSnapshot(SnapshotFailure)` returns follower to probing behavior;
+   * `ReportSnapshot(SnapshotFinish)` is accepted and does not break progress;
+   * follower receives `MsgSnap`;
+   * follower restores snapshot;
+   * restored snapshot appears as `Ready.Snapshot`;
+   * committed/applied boundaries after restore;
+   * ConfState restored from snapshot;
+   * entries below snapshot index are not re-applied;
+   * first/last index after restore;
+   * term lookup at snapshot boundary;
+   * compacted error propagation;
+   * unavailable error propagation;
+   * memory free paths for snapshot data.
+
+10. Differential testing:
+    Where practical, run identical scripted snapshot scenarios against:
+
+    * pure-Go RawNode,
+    * C-backed RawNode,
+      and compare:
+    * Ready.Snapshot,
+    * outbound MsgSnap,
+    * HardState,
+    * commit index,
+    * applied boundaries,
+    * ConfState,
+    * progress state after ReportSnapshot,
+    * behavior after compaction.
+
+11. etcd-specific awareness:
+    Do not bake etcd v3 large snapshot streaming into the C raft core.
+    The raft core should only understand `raftpb.Snapshot` semantics:
+
+    * metadata,
+    * opaque data.
+      Large etcd backend snapshot streaming remains application/transport-layer responsibility.
+
+12. Default behavior:
+
+    * The default pure-Go raft implementation must remain unchanged.
+    * The C-backed implementation remains behind the selected build tag.
+    * Existing default `go test ./...` must pass.
+
+13. Build-tagged validation:
+    Run:
+
+    * default `go test ./...`,
+    * C-backed tests, for example `go test -tags crawnode ./...`,
+    * any C unit tests added for this phase.
+
+14. Produce PHASE8_C_SNAPSHOT_RESULT.md summarizing:
+
+    * files changed,
+    * snapshot send path implemented,
+    * snapshot restore path implemented,
+    * compaction behavior implemented,
+    * ReportSnapshot behavior,
+    * memory ownership decisions,
+    * tests added,
+    * differential test results,
+    * known deviations from Go behavior,
+    * next recommended phase.
+
+Important:
+Snapshot behavior is safety-critical. Do not shortcut metadata handling, ConfState restoration, log boundary updates, or Ready/Advance persistence semantics.
+

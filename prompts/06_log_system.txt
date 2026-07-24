@@ -1,0 +1,140 @@
+Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
+
+Now implement Phase 5 only: port the log subsystem to C.
+
+Goal:
+Implement the C equivalents of the Go raft log layer, including raftLog, unstable entries/snapshot handling, and storage-backed log access through the already-built C storage callback bridge.
+
+Do not port the full Raft state machine yet. This phase should focus on log correctness.
+
+Scope:
+
+1. Port or implement C equivalents of:
+
+   * raftLog
+   * unstable log buffer
+   * unstable snapshot tracking
+   * log term lookup
+   * log slicing
+   * first index / last index handling
+   * committed / applying / applied indexes
+   * stable-to / stable-snapshot-to behavior
+   * restore from snapshot
+   * append logic
+   * conflict detection
+   * maybeAppend semantics
+   * compaction-aware storage access
+
+2. Use the C storage callback bridge from Phase 4.
+   The C log layer must call:
+
+   * `Storage.FirstIndex`
+   * `Storage.LastIndex`
+   * `Storage.Term`
+   * `Storage.Entries`
+   * `Storage.Snapshot`
+
+3. Preserve Go semantics.
+   Inspect the current Go implementation before porting. Match behavior for:
+
+   * `firstIndex`
+   * `lastIndex`
+   * `term`
+   * `entries`
+   * `slice`
+   * `maybeAppend`
+   * `findConflict`
+   * `findConflictByTerm`, if present
+   * `isUpToDate`
+   * `nextUnstableEnts`
+   * `nextCommittedEnts`
+   * `hasNextCommittedEnts`
+   * `appliedTo`
+   * `stableTo`
+   * `stableSnapTo`
+   * `restore`
+
+4. Preserve error behavior.
+   Correctly handle:
+
+   * compacted entries
+   * unavailable entries
+   * temporarily unavailable snapshot
+   * out-of-bounds indexes
+   * fatal storage errors
+   * panic/fatal bridge errors
+
+5. Preserve safety-critical invariants:
+
+   * never return log entries out of order;
+   * never apply entries below or equal to the applied index again;
+   * never advance committed beyond known last index;
+   * never treat unstable entries as persisted until stable/advance logic says so;
+   * preserve snapshot metadata index/term semantics;
+   * preserve compaction behavior;
+   * preserve conflict detection exactly.
+
+6. Memory ownership:
+
+   * C log-owned entries must be C-owned.
+   * Do not store pointers into Go-owned entries returned by the Storage bridge.
+   * If entries from Go Storage are needed after callback return, deep-copy them into C-owned memory.
+   * Add or reuse explicit free functions for entry vectors and snapshots.
+   * Avoid leaks on error paths.
+
+7. Testing:
+   Add focused C or Go build-tagged tests for the C log subsystem.
+
+   Test at least:
+
+   * initialization from empty storage;
+   * initialization from non-empty storage;
+   * first index and last index;
+   * term lookup from storage;
+   * term lookup from unstable entries;
+   * term lookup across snapshot boundary;
+   * entries slicing from storage;
+   * entries slicing from unstable;
+   * entries slicing across storage and unstable;
+   * append entries;
+   * append entries with conflict;
+   * maybeAppend success;
+   * maybeAppend rejection;
+   * committed index advancement;
+   * applied index advancement;
+   * stableTo;
+   * stableSnapTo;
+   * restore snapshot;
+   * compacted error handling;
+   * unavailable error handling;
+   * snapshot temporarily unavailable handling;
+   * memory free paths.
+
+8. Default behavior:
+
+   * The default pure-Go raft implementation must remain unchanged.
+   * The C-backed implementation should remain behind the existing build tag.
+   * Existing default `go test ./...` must still pass.
+
+9. Build-tagged validation:
+   Run:
+
+   * default `go test ./...`
+   * C-backed/build-tagged tests, for example `go test -tags crawnode ./...`
+   * any C unit tests added for the log subsystem
+
+10. Produce PHASE5_C_LOG_SUBSYSTEM_RESULT.md summarizing:
+
+* files changed,
+* C log structs added,
+* functions implemented,
+* mapping from Go log functions to C functions,
+* storage callback usage,
+* memory ownership decisions,
+* tests added,
+* test results,
+* remaining gaps before porting the full raft state machine.
+
+Important:
+This phase is about the log subsystem only. Do not implement full leader election, message handling, progress tracker, read-only logic, or full RawNode behavior yet unless absolutely necessary for isolated log tests.
+

@@ -1,0 +1,20 @@
+Read RAFT_C_PORTING_SPEC.md and inspect this repository.
+
+Do not write C code yet.
+
+Task 1: create PORTING_BASELINE.md and PHASE1_RAWNODE_BOUNDARY_PLAN.md.
+
+In PORTING_BASELINE.md:
+- record the current git commit hash,
+- record Go version and test command,
+- run go test ./... and summarize the result.
+
+In PHASE1_RAWNODE_BOUNDARY_PLAN.md:
+- list the current Node interface methods,
+- list the current RawNode methods and fields,
+- list every place where node.go/node.run directly accesses rn.raft or raft internals,
+- propose the minimal RawNode methods/getters needed to remove those direct accesses,
+- explain how the refactor preserves Ready/Advance semantics,
+- identify tests that must pass after the refactor.
+
+Do not implement Phase 1 until I approve the plan.

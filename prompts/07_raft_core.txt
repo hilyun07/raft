@@ -1,0 +1,184 @@
+Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
+
+Now implement Phase 6 only: port the core Raft state machine to C, enough to support basic election, append replication, and Ready generation.
+
+Goal:
+Implement the C equivalent of the core `raft` state machine on top of the C log subsystem from Phase 5.
+
+Do not attempt to complete every advanced feature in this phase. Focus on correctness for the basic Raft loop:
+
+* tick,
+* election,
+* vote/pre-vote if supported,
+* become follower/candidate/leader,
+* append entries,
+* heartbeat,
+* message send queue,
+* basic Ready output.
+
+Scope:
+
+1. Port or implement C equivalents of the core raft state:
+
+   * node id,
+   * term,
+   * vote,
+   * lead,
+   * raft state type,
+   * election elapsed,
+   * heartbeat elapsed,
+   * election timeout,
+   * heartbeat timeout,
+   * randomized election timeout if present,
+   * check quorum flags if needed,
+   * pre-vote flags if supported,
+   * raft log pointer,
+   * outgoing messages,
+   * messages-after-append queue,
+   * read states placeholder if needed.
+
+2. Implement role transitions:
+
+   * become follower,
+   * become candidate,
+   * become pre-candidate if current implementation supports pre-vote,
+   * become leader.
+
+3. Implement ticking:
+
+   * follower/candidate election tick,
+   * leader heartbeat tick,
+   * generation of local campaign/heartbeat events.
+
+4. Implement basic message stepping:
+
+   * `MsgHup`,
+   * `MsgBeat`,
+   * `MsgProp`,
+   * `MsgApp`,
+   * `MsgAppResp`,
+   * `MsgVote`,
+   * `MsgVoteResp`,
+   * `MsgPreVote`,
+   * `MsgPreVoteResp`,
+   * `MsgHeartbeat`,
+   * `MsgHeartbeatResp`.
+
+5. Implement basic append replication:
+
+   * leader appends proposal entries to local log,
+   * leader sends append messages to followers,
+   * follower validates prev log index/term,
+   * follower appends entries,
+   * follower sends append response,
+   * leader updates follower progress enough to commit replicated entries.
+
+6. Implement basic quorum commit:
+
+   * track follower match indexes,
+   * advance commit index when quorum has replicated an entry from the current term,
+   * expose committed entries through Ready.
+
+7. Implement outgoing message queues:
+
+   * normal `Messages`,
+   * `msgsAfterAppend` or equivalent delayed-send semantics,
+   * preserve the safety rule that messages depending on persistent state are not released before storage append is accepted.
+
+8. Implement minimal integration with C RawNode:
+
+   * `raft_raw_node_tick`,
+   * `raft_raw_node_campaign`,
+   * `raft_raw_node_propose`,
+   * `raft_raw_node_step`,
+   * `raft_raw_node_has_ready`,
+   * `raft_raw_node_ready` or `ready_without_accept`,
+   * `raft_raw_node_accept_ready`,
+   * `raft_raw_node_advance`.
+
+9. Preserve Ready/Advance semantics:
+
+   * entries returned in Ready are not considered stable until accepted/advanced according to the existing design,
+   * committed entries are exposed in order,
+   * messages-after-append are released only after the relevant append persistence is accepted,
+   * `MustSync` is calculated consistently with the Go implementation.
+
+10. Preserve Storage callback rules:
+
+* C raft core may call storage through the C storage callback ABI,
+* never retain Go-owned memory,
+* deep-copy if data must outlive the callback,
+* propagate storage errors correctly.
+
+11. Do not implement advanced features yet unless required by tests:
+
+* full snapshot send/restore,
+* leadership transfer,
+* ReadIndex,
+* lease-based reads,
+* joint consensus,
+* async storage writes,
+* full tracker optimization,
+* log compaction edge cases beyond what the log subsystem already supports.
+
+12. Testing:
+    Add C-backed tests for a minimal cluster simulation.
+
+Test at least:
+
+* single-node election,
+* three-node election,
+* vote rejection based on stale log,
+* leader appends proposal,
+* follower accepts append,
+* follower rejects append with wrong prev log term/index,
+* leader handles append response,
+* quorum commit,
+* committed entries appear in Ready,
+* Ready entries are marked stable only after Advance,
+* messages are generated to the correct peers,
+* messages-after-append are not released too early,
+* step with higher term causes follower transition,
+* step with lower term is rejected/ignored as in Go implementation.
+
+13. Differential testing:
+    If practical, add tests that run the same scripted message sequence against:
+
+* existing pure-Go RawNode,
+* C-backed RawNode,
+  and compare:
+* HardState,
+* SoftState,
+* Ready entries,
+* committed entries,
+* outbound message types and targets,
+* leader/term/state.
+
+14. Default behavior:
+
+* The default pure-Go raft implementation must remain unchanged.
+* C-backed behavior remains behind the existing build tag.
+* Existing default `go test ./...` must pass.
+
+15. Build-tagged validation:
+    Run:
+
+* default `go test ./...`,
+* C-backed tests, for example `go test -tags crawnode ./...`,
+* any C unit tests added for this phase.
+
+16. Produce PHASE6_C_RAFT_CORE_RESULT.md summarizing:
+
+* files changed,
+* C raft core structs added,
+* message types implemented,
+* role transitions implemented,
+* Ready/Advance integration status,
+* tests added,
+* differential test status,
+* known deviations from Go behavior,
+* remaining features to port.
+
+Important:
+This phase must prioritize safety and semantic equivalence over completeness. Keep the implementation small enough to review. Do not attempt to port every feature in one pass.
+

@@ -1,0 +1,145 @@
+Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
+
+Now implement Phase 7 only: port quorum, progress tracking, and configuration change logic to C.
+
+Goal:
+Complete the C equivalents of the Raft membership/progress layer so that the C RawNode can correctly track follower replication progress, compute quorum, and apply configuration changes.
+
+This phase builds on the basic C raft core from Phase 6.
+
+Scope:
+
+1. Port or implement C equivalents of:
+
+   * progress tracker,
+   * per-follower replication progress,
+   * progress states such as probe, replicate, snapshot if present,
+   * inflight tracking if present,
+   * quorum calculation,
+   * voter and learner sets,
+   * joint consensus configuration if supported,
+   * confchange logic,
+   * conf state generation.
+
+2. Preserve Go semantics.
+   Inspect the current Go implementation before porting. Match behavior for:
+
+   * `tracker.Progress`,
+   * `tracker.ProgressTracker`,
+   * `quorum` package,
+   * `confchange` package,
+   * `ConfState`,
+   * `ApplyConfChange`,
+   * learners,
+   * voters,
+   * joint consensus,
+   * auto-leave behavior if present.
+
+3. Implement accurate commit calculation.
+   The C leader must advance commit index using the same quorum rules as the Go implementation.
+   This includes:
+
+   * majority quorum,
+   * joint quorum if supported,
+   * learners not counting as voters,
+   * only committing entries according to the Raft current-term rule.
+
+4. Implement progress transitions.
+   Preserve behavior for:
+
+   * append success,
+   * append rejection,
+   * probe state,
+   * replicate state,
+   * snapshot state,
+   * maybe decrement next index,
+   * maybe update match index,
+   * pause/resume behavior if present,
+   * inflight windows if present.
+
+5. Implement config changes.
+   Support committed config-change entries through C RawNode:
+
+   * `raft_raw_node_apply_conf_change`,
+   * conversion between C conf change structs and Go `raftpb.ConfChange` / `ConfChangeV2`,
+   * returned `ConfState`,
+   * add voter,
+   * remove voter,
+   * add learner,
+   * promote learner,
+   * joint consensus enter/leave if supported.
+
+6. Preserve safety-critical config-change rules.
+
+   * Config changes must affect quorum only when applied through `ApplyConfChange`.
+   * Do not apply config changes at proposal time.
+   * If the application rejects a config change as a noop, it must not call `ApplyConfChange`.
+   * Returned `ConfState` must be suitable for snapshot metadata.
+   * Invalid config changes must produce the same kind of error/panic behavior as the Go implementation.
+
+7. Update Ready/CommittedEntries integration if needed.
+   Config-change entries should appear in `Ready.CommittedEntries`.
+   The application should decode and apply them in order, then call `ApplyConfChange`.
+   Preserve existing Go-facing behavior.
+
+8. Testing:
+   Add C-backed tests for:
+
+   * leader progress update on append success,
+   * progress update on append rejection,
+   * quorum commit with 3 nodes,
+   * quorum commit with 5 nodes,
+   * learners do not count toward quorum,
+   * add learner,
+   * promote learner,
+   * add voter,
+   * remove voter,
+   * remove leader if supported,
+   * joint consensus enter/leave if supported,
+   * commit calculation under joint quorum,
+   * ConfState returned from ApplyConfChange,
+   * snapshot ConfState compatibility.
+
+9. Differential testing:
+   Where practical, run the same scripted scenarios against:
+
+   * pure-Go RawNode,
+   * C-backed RawNode,
+     and compare:
+   * leader,
+   * term,
+   * commit index,
+   * progress match/next indexes,
+   * voter/learner sets,
+   * ConfState,
+   * Ready entries/messages.
+
+10. Default behavior:
+
+* The default pure-Go raft implementation must remain unchanged.
+* The C-backed implementation remains behind the selected build tag.
+* Existing default `go test ./...` must pass.
+
+11. Build-tagged validation:
+    Run:
+
+* default `go test ./...`,
+* C-backed tests, for example `go test -tags crawnode ./...`,
+* any C unit tests added for this phase.
+
+12. Produce PHASE7_C_TRACKER_QUORUM_CONFCHANGE_RESULT.md summarizing:
+
+* files changed,
+* tracker/progress components ported,
+* quorum components ported,
+* confchange components ported,
+* supported membership operations,
+* unsupported or deferred cases,
+* tests added,
+* differential test results,
+* known deviations from Go behavior,
+* next recommended phase.
+
+Important:
+This phase is safety-critical. Quorum and configuration-change behavior must match the Go implementation closely. Do not simplify membership logic in ways that change Raft safety semantics.
+

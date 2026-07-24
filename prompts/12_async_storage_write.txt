@@ -1,0 +1,143 @@
+Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
+
+Now implement Phase 11 only: port AsyncStorageWrites and local storage message handling to C.
+
+Goal:
+Complete the C-backed RawNode behavior for asynchronous storage writes, including local storage messages, response delivery, and the replacement of normal `Advance()` semantics when async storage writes are enabled.
+
+Scope:
+
+1. Inspect the current Go implementation first.
+   Identify exactly how the current code implements:
+
+   * `AsyncStorageWrites`;
+   * `MsgStorageAppend`;
+   * `MsgStorageAppendResp`;
+   * `MsgStorageApply`;
+   * `MsgStorageApplyResp`;
+   * `LocalAppendThread`;
+   * `LocalApplyThread`;
+   * message `Responses`;
+   * `stepsOnAdvance`;
+   * `acceptReady`;
+   * restrictions on calling `Advance()`.
+
+2. Port C equivalents of local storage message generation.
+   In async storage writes mode, C `Ready.Messages` should include local storage messages instead of requiring the application to process `HardState`, `Entries`, `Snapshot`, and `CommittedEntries` directly.
+
+3. Preserve local-target routing semantics.
+   Messages targeting:
+
+   * `LocalAppendThread`
+   * `LocalApplyThread`
+
+   must never be treated as remote network messages.
+
+4. Preserve ordering requirements.
+
+   * Messages to the same local target must be reliable and in order.
+   * Do not reorder messages to `LocalAppendThread`.
+   * Do not reorder messages to `LocalApplyThread`.
+   * Different local targets may proceed independently if the Go implementation allows it.
+
+5. Preserve durability requirements.
+
+   * `MsgStorageAppend` must not deliver its response messages until the associated HardState, Entries, and Snapshot writes are durable according to existing Go semantics.
+   * `MsgStorageApply` must not deliver its response messages until the associated apply work is complete.
+   * Match the Go implementation’s durability distinction between append and apply.
+
+6. Preserve response delivery semantics.
+
+   * Local storage messages may contain `Responses`.
+   * Storage/apply workers must deliver these responses after finishing their work.
+   * Responses may target the local raft node or remote peers.
+   * Responses should be routed according to message target/type.
+   * Storage workers should not need to understand the semantic content of response messages beyond routing.
+
+7. Preserve `Advance()` restrictions.
+
+   * In `AsyncStorageWrites` mode, `Advance()` must not be called.
+   * If the current Go implementation panics or errors when `Advance()` is called in this mode, mirror that behavior in the C-backed implementation.
+   * Local storage response messages replace the role normally played by `Advance()`.
+
+8. Update C RawNode APIs and Go bindings if needed.
+   Ensure C-backed Go RawNode supports:
+
+   * async storage write config;
+   * local storage message targets;
+   * message responses;
+   * stepping `MsgStorageAppendResp` / `MsgStorageApplyResp`;
+   * status/debug visibility where needed.
+
+9. Memory ownership.
+
+   * Local storage messages may carry entries, snapshots, hard state, committed entries, and responses.
+   * Do not retain Go-owned memory.
+   * Deep-copy payloads into C-owned memory if retained by C.
+   * Convert C-owned messages into Go-owned `raftpb.Message` objects before returning through Go `Ready.Messages`.
+   * Free C-owned structures explicitly.
+
+10. Tests:
+    Add C-backed tests for:
+
+    * async storage writes enabled;
+    * `Ready.Messages` contains `MsgStorageAppend`;
+    * `Ready.Messages` contains `MsgStorageApply`;
+    * normal `Ready.Entries` / `Ready.CommittedEntries` handling is replaced or adjusted as in Go semantics;
+    * `Advance()` is forbidden in async mode;
+    * append worker response delivery advances raft state;
+    * apply worker response delivery advances apply state;
+    * responses are delivered only after work is complete;
+    * local target messages are not sent over network;
+    * same-target local messages are processed in order;
+    * different-target local messages may proceed as allowed;
+    * message response routing;
+    * snapshot in async append path;
+    * committed entries in async apply path;
+    * error or panic behavior matches Go implementation.
+
+11. Differential testing:
+    Where practical, run identical async storage write scenarios against:
+
+    * pure-Go RawNode,
+    * C-backed RawNode,
+      and compare:
+    * Ready fields,
+    * Ready.Messages,
+    * local storage messages,
+    * response messages,
+    * HardState,
+    * Entries,
+    * CommittedEntries,
+    * apply progress,
+    * behavior when `Advance()` is called.
+
+12. Default behavior:
+
+    * The default pure-Go raft implementation must remain unchanged.
+    * The C-backed implementation remains behind the selected build tag.
+    * Existing default `go test ./...` must pass.
+
+13. Build-tagged validation:
+    Run:
+
+    * default `go test ./...`;
+    * C-backed tests, for example `go test -tags crawnode ./...`;
+    * any C unit tests added for this phase.
+
+14. Produce PHASE11_C_ASYNC_STORAGE_WRITES_RESULT.md summarizing:
+
+    * files changed;
+    * async storage writes config support;
+    * local storage message support;
+    * response delivery implementation;
+    * `Advance()` behavior;
+    * memory ownership decisions;
+    * tests added;
+    * differential test results;
+    * known deviations from Go behavior;
+    * next recommended phase.
+
+Important:
+AsyncStorageWrites changes the Ready/Advance contract. Do not approximate it. Match the current Go semantics closely, especially local message ordering, response delivery, and the prohibition on `Advance()`.
+

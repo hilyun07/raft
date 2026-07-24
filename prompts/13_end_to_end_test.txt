@@ -1,0 +1,164 @@
+Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
+
+Now implement Phase 12 only: wire the C-backed RawNode into the Go Node path and run end-to-end Node-level tests.
+
+Goal:
+Make the Go `Node` implementation use the C-backed Go `RawNode` binding under the selected build tag, while preserving the existing pure-Go implementation as the default.
+
+This phase is about end-to-end integration through the public Go `Node` API.
+
+Scope:
+
+1. Preserve default behavior.
+
+   * Without the C-backed build tag, the existing pure-Go implementation must remain the default.
+   * Existing `go test ./...` must still pass without the build tag.
+
+2. Enable C-backed Node path behind a build tag.
+
+   * Under the chosen tag, for example `crawnode` or `cgo_raft`, `StartNode`, `RestartNode`, and `NewRawNode` should construct the C-backed RawNode binding.
+   * The Go `Node` channel actor should remain Go-based.
+
+3. Preserve the public Go `Node` interface:
+
+   * `Tick`
+   * `Campaign`
+   * `Propose`
+   * `ProposeConfChange`
+   * `Step`
+   * `Ready`
+   * `Advance`
+   * `ApplyConfChange`
+   * `TransferLeadership`
+   * `ForgetLeader`
+   * `ReadIndex`
+   * `Status`
+   * `ReportUnreachable`
+   * `ReportSnapshot`
+   * `Stop`
+
+4. Preserve `context.Context` behavior in the Go Node layer.
+
+   * `Propose(ctx, ...)`, `Step(ctx, ...)`, `ReadIndex(ctx, ...)`, `Campaign(ctx)`, and similar methods must still respect context cancellation and stopped-node behavior as before.
+   * C code should not need to understand Go contexts.
+
+5. Preserve thread-safety layering.
+
+   * C `raft_raw_node_t` remains thread-unsafe.
+   * Go `Node` serializes access through its channel actor.
+   * Do not call into the same C RawNode concurrently from multiple goroutines.
+
+6. Finish any missing Go RawNode getters/methods needed by `node.run`.
+
+   * Do not reintroduce direct access to Go raft internals.
+   * `node.run` should call Go RawNode binding methods, not C directly unless unavoidable.
+   * Keep C ABI conversion localized in the Go RawNode binding layer.
+
+7. Ensure Ready/Advance works end-to-end through Node.
+   Test that:
+
+   * `Ready()` channel emits Ready values;
+   * app can persist entries/hard state/snapshot;
+   * app can send messages;
+   * app can apply committed entries;
+   * `Advance()` unblocks the next Ready;
+   * `Advance()` is forbidden in async storage write mode if applicable.
+
+8. Ensure proposal path works end-to-end.
+   Test that:
+
+   * `Node.Propose(ctx, data)` accepts proposals on leader;
+   * proposal success does not mean committed;
+   * committed proposal appears later in `Ready.CommittedEntries`;
+   * proposal result channel behavior matches existing Go semantics;
+   * proposal drop/error behavior matches existing Go semantics.
+
+9. Ensure Step/network path works end-to-end.
+   Test that:
+
+   * received remote messages passed to `Node.Step(ctx, msg)` reach C raft core;
+   * outbound messages appear in `Ready.Messages`;
+   * message types and targets match Go behavior;
+   * local/internal messages are not treated as remote network messages.
+
+10. Ensure config-change path works end-to-end.
+    Test:
+
+    * `ProposeConfChange`;
+    * committed config-change entry appears;
+    * app calls `ApplyConfChange`;
+    * returned `ConfState`;
+    * membership actually changes in C core;
+    * snapshot ConfState compatibility.
+
+11. Ensure ReadIndex path works end-to-end.
+    Test:
+
+    * `Node.ReadIndex(ctx, rctx)`;
+    * `Ready.ReadStates`;
+    * request context round trip;
+    * applied-index wait rule.
+
+12. Ensure snapshot path works end-to-end.
+    Test:
+
+    * outbound `MsgSnap`;
+    * `ReportSnapshot`;
+    * incoming snapshot restore;
+    * `Ready.Snapshot`;
+    * storage/application snapshot apply flow.
+
+13. Add or adapt Node-level integration tests.
+    Use existing raft test harnesses where possible.
+    Add C-backed build-tagged tests for:
+
+    * single-node Node lifecycle;
+    * three-node election;
+    * proposal commit;
+    * follower Step receive;
+    * Ready/Advance sequencing;
+    * restart using Storage;
+    * config change;
+    * snapshot restore;
+    * ReadIndex;
+    * leadership transfer;
+    * Stop behavior;
+    * context cancellation;
+    * stopped node errors.
+
+14. Differential testing:
+    Where practical, run the same Node-level scripted scenarios against:
+
+    * pure-Go Node,
+    * C-backed Node,
+      and compare:
+    * Ready outputs;
+    * messages;
+    * committed entries;
+    * hard state;
+    * soft state;
+    * status;
+    * final storage/application state.
+
+15. Build and test:
+    Run:
+
+    * default `go test ./...`;
+    * C-backed `go test -tags crawnode ./...` or the selected build tag;
+    * targeted package tests with verbose output if failures occur.
+
+16. Produce PHASE12_C_BACKED_NODE_INTEGRATION_RESULT.md summarizing:
+
+    * files changed;
+    * how build tags select pure-Go vs C-backed implementation;
+    * how `StartNode` / `RestartNode` / `NewRawNode` behave;
+    * Node methods verified;
+    * tests added;
+    * differential test results;
+    * known deviations from pure-Go behavior;
+    * blockers before etcd integration;
+    * next recommended phase.
+
+Important:
+This phase should not make the C backend the default. It should make the C-backed path selectable, testable, and semantically comparable through the existing Go `Node` API.
+

@@ -1,0 +1,132 @@
+iRead RAFT_C_PORTING_SPEC.md and all previous phase result files.
+
+Now implement Phase 9 only: port ReadIndex and read-only request handling to C.
+
+Goal:
+Complete the C RawNode read-only path so that linearizable reads through ReadIndex behave like the Go implementation.
+
+This phase builds on:
+
+* C raft core,
+* C log subsystem,
+* C progress tracker/quorum,
+* C snapshot behavior,
+* C Ready/Advance handling.
+
+Scope:
+
+1. Port or implement C equivalents of the Go read-only subsystem:
+
+   * read-only request tracking,
+   * read index request contexts,
+   * pending read states,
+   * quorum acknowledgement tracking for read-only requests,
+   * safe read index calculation,
+   * response handling,
+   * `Ready.ReadStates`.
+
+2. Support `ReadOnlySafe`.
+   Preserve the Go semantics:
+
+   * leader must confirm it is still leader through quorum communication;
+   * read request must produce a `ReadState`;
+   * application must wait until local applied index is at least `ReadState.Index`;
+   * `RequestCtx` must match the original application request context.
+
+3. Support `ReadOnlyLeaseBased` only if the current Go implementation supports it.
+   Preserve all safety assumptions:
+
+   * requires `CheckQuorum` if the Go implementation requires it;
+   * depends on bounded clock drift / leader lease assumptions;
+   * must not silently weaken linearizability;
+   * must match existing Go behavior.
+
+4. Implement C RawNode API integration:
+
+   * `raft_raw_node_read_index`;
+   * propagation of read index requests into raft core;
+   * generation of `ReadStates` in `raft_ready_t`;
+   * conversion from C read states to Go `Ready.ReadStates`.
+
+5. Preserve request context ownership.
+
+   * Do not store pointers to Go-owned `rctx` bytes in C.
+   * Deep-copy request context into C-owned memory if it must outlive the call.
+   * Deep-copy C-owned request context back into Go-owned `ReadState.RequestCtx` when producing `Ready`.
+
+6. Preserve Ready semantics:
+
+   * `ReadStates` are not persisted;
+   * `ReadStates` must be drained only when Ready is accepted, matching Go behavior;
+   * `ReadState.Index` must refer to the safe read index;
+   * `ReadState` is valid only for the corresponding request context.
+
+7. Preserve lost-request semantics.
+   Existing Go semantics allow `ReadIndex` requests to be lost without explicit notification. Do not invent stronger guarantees unless explicitly documented and tested.
+
+8. Interaction with leader/follower:
+   Match Go behavior for:
+
+   * leader receiving local ReadIndex request;
+   * follower forwarding ReadIndex request to leader if applicable;
+   * node without known leader;
+   * stale term messages;
+   * leader step-down during read request;
+   * read request while campaigning.
+
+9. Tests:
+   Add C-backed tests for:
+
+   * single-node ReadIndex;
+   * three-node ReadIndex through leader;
+   * follower ReadIndex forwarding behavior, if supported;
+   * `Ready.ReadStates` generation;
+   * `RequestCtx` round trip;
+   * application-applied-index rule: read is only safe after applied index reaches `ReadState.Index`;
+   * lost or delayed read request behavior;
+   * leader step-down before read completion;
+   * `ReadOnlySafe` quorum confirmation;
+   * `ReadOnlyLeaseBased` behavior if supported;
+   * memory free paths for request contexts.
+
+10. Differential testing:
+    Where practical, run identical ReadIndex scenarios against:
+
+    * pure-Go RawNode,
+    * C-backed RawNode,
+      and compare:
+    * generated messages,
+    * `Ready.ReadStates`,
+    * `ReadState.Index`,
+    * `RequestCtx`,
+    * leader/term/state transitions.
+
+11. Default behavior:
+
+    * The default pure-Go raft implementation must remain unchanged.
+    * The C-backed implementation remains behind the selected build tag.
+    * Existing default `go test ./...` must pass.
+
+12. Build-tagged validation:
+    Run:
+
+    * default `go test ./...`,
+    * C-backed tests, for example `go test -tags crawnode ./...`,
+    * any C unit tests added for this phase.
+
+13. Produce PHASE9_C_READINDEX_RESULT.md summarizing:
+
+    * files changed,
+    * read-only subsystem components ported,
+    * `ReadOnlySafe` status,
+    * `ReadOnlyLeaseBased` status,
+    * Ready.ReadStates integration,
+    * memory ownership decisions,
+    * tests added,
+    * differential test results,
+    * known deviations from Go behavior,
+    * next recommended phase.
+
+Important:
+ReadIndex affects linearizable read safety. Do not return ReadStates early, do not ignore applied-index requirements, and do not weaken quorum/lease assumptions.
+

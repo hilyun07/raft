@@ -1,0 +1,133 @@
+Read RAFT_C_PORTING_SPEC.md, PORTING_BASELINE.md, PHASE1_RAWNODE_BOUNDARY_RESULT.md, PHASE2_C_RAWNODE_SKELETON_RESULT.md, and PHASE3_GO_RAWNODE_BINDING_RESULT.md.
+
+Now implement Phase 4 only: complete the Go Storage callback bridge for the C RawNode API.
+
+Goal:
+Allow the C RawNode layer to call the application-provided Go `Storage` implementation through a safe C callback ABI.
+
+Do not port the full Raft algorithm yet. This phase is about making the Storage callback boundary correct, safe, and testable.
+
+Requirements:
+
+1. Preserve default pure-Go behavior.
+
+   * The existing pure-Go raft implementation must remain the default.
+   * The C-backed path should remain behind the chosen build tag, for example `crawnode` or `cgo_raft`.
+
+2. Implement the C storage callback ABI.
+   The C side should support callbacks equivalent to the Go `Storage` interface:
+
+   * `InitialState`
+   * `Entries`
+   * `Term`
+   * `FirstIndex`
+   * `LastIndex`
+   * `Snapshot`
+
+3. Use `runtime/cgo.Handle`.
+
+   * Do not store raw Go object pointers in C memory.
+   * Store only `uintptr_t` handles in C.
+   * Use `cgo.Handle(handle).Value()` inside exported Go bridge functions.
+   * Delete handles only after the C raw node is fully destroyed and no callback can still be in flight.
+
+4. Implement exported Go bridge functions for:
+
+   * initial state
+   * entries
+   * term
+   * first index
+   * last index
+   * snapshot
+
+5. Add panic guards to every exported Go callback.
+
+   * Do not let Go panic cross the C ABI boundary.
+   * Recover panic at the boundary.
+   * Convert panic to a fatal C error code, for example `RAFT_ERR_PANIC`.
+   * Log panic value and stack if practical.
+   * Do not treat panic as recoverable normal control flow.
+
+6. Implement explicit error mapping.
+   Do not collapse all Go errors into one generic error. Distinguish at least:
+
+   * OK
+   * compacted
+   * unavailable
+   * snapshot temporarily unavailable
+   * storage error
+   * panic/fatal error
+   * invalid argument
+
+7. Implement safe memory ownership for `Entries`.
+
+   * Go `Storage.Entries` returns Go-owned entries.
+   * The bridge must not let C retain pointers to Go-owned protobuf objects, Go slices, or Go byte arrays.
+   * If C needs entries after the callback returns, deep-copy entries into C-owned memory.
+   * Provide/free C-owned entry vectors with explicit functions such as `raft_entry_vec_free`.
+
+8. Implement safe memory ownership for `Snapshot`.
+
+   * Do not let C retain pointers into Go-owned `Snapshot.Data`.
+   * Deep-copy snapshot metadata and data into C-owned memory if C will use it after the callback returns.
+   * Provide explicit free functions for C-owned snapshots.
+
+9. Implement safe memory ownership for `InitialState`.
+
+   * Copy `HardState` and `ConfState` into C-owned/output C structs.
+   * Do not store Go pointers.
+
+10. Define and document callback reentrancy rules.
+    Add comments in the bridge code:
+
+    * Storage callbacks must not call back into the same raft node API.
+    * Storage callbacks should avoid blocking channel operations.
+    * C raft locks must not be held while invoking Go callbacks.
+    * Go wrapper locks must not be held while calling callback-capable C functions.
+
+11. Add tests for the storage bridge under the C-backed build tag.
+    Tests should cover:
+
+    * `Term`
+    * `FirstIndex`
+    * `LastIndex`
+    * `InitialState`
+    * `Entries`
+    * `Snapshot`
+    * `ErrCompacted`
+    * `ErrUnavailable`
+    * `ErrSnapshotTemporarilyUnavailable`
+    * generic storage error
+    * panic in a storage method, converted to `RAFT_ERR_PANIC`
+    * handle deletion/lifetime behavior where safely testable
+    * memory free paths for entries and snapshots
+
+12. Add a small fake Go `Storage` implementation for tests.
+    It should be able to return deterministic entries, hard state, conf state, snapshots, and configured errors/panics.
+
+13. Do not implement full C Raft behavior yet.
+    It is acceptable to write focused C test helpers that invoke the storage callbacks directly.
+
+14. Run:
+
+    * default `go test ./...`
+    * build-tagged tests, e.g. `go test -tags crawnode ./...`
+    * any C unit tests or compile checks added in this phase
+
+15. Produce PHASE4_STORAGE_BRIDGE_RESULT.md summarizing:
+
+    * files changed,
+    * callback ABI implemented,
+    * Go exported bridge functions added,
+    * error mapping table,
+    * ownership/freeing rules,
+    * tests added,
+    * test results,
+    * known limitations,
+    * next recommended phase.
+
+16. Git add and commit what you have done.
+
+Important:
+This phase is safety-critical. Correctness is more important than performance. Prefer deep copies and explicit free functions over borrowed pointer tricks.
+
