@@ -196,9 +196,10 @@ then deletes the `cgo.Handle`. A finalizer is the fallback because public Go
 RawNode has no Close method. A later end-to-end Node integration can call the
 package-private deterministic destroy hook after its actor stops.
 
-The current C constructor copies but does not invoke Storage callbacks, so
-callback behavior is compiled and linked but full C-core callback execution
-tests remain for the next storage/core phase.
+The current C constructor copies but does not invoke Storage callbacks. Phase
+5 adds a private C call-through harness and focused tagged tests for all six
+callbacks, including deep copies, nil/empty preservation, error/panic mapping,
+and handle cleanup. Real C log/core consumption remains deferred.
 
 ## Ready and Advance ownership
 
@@ -296,8 +297,10 @@ compiled with `-Wall -Wextra -Werror -Wpedantic` and its test binary passed.
   Ready semantics were invented in Go.
 - Tick and TickQuiesced are inert C void stubs and cannot signal
   not-implemented status.
-- The C constructor does not yet call Storage; end-to-end callback invocation,
-  fatal-state propagation, and sanitizer tests remain deferred.
+- The C constructor does not yet call Storage as part of consensus
+  initialization. Bridge-level C-to-Go callback invocation is covered in
+  Phase 5; real-core fatal-state propagation and end-to-end sanitizer tests
+  remain deferred.
 - `HasProgress` returns false until the C progress tracker exists.
 - The C message ABI currently lacks protobuf scalar presence bits. Conversion
   therefore preserves values but cannot yet preserve every absent-versus-zero

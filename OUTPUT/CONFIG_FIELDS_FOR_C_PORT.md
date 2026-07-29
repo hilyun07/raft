@@ -69,8 +69,8 @@ panic mechanism.
 ## Storage requirements
 
 Storage is required even in the early skeleton ABI so its lifetime can be
-designed correctly, but Phase 2 must not pretend to have read it. Phase 4 must
-define:
+designed correctly, but Phase 2 must not pretend to have read it. The
+Phase 4/5 tagged binding now defines and tests:
 
 - a `runtime/cgo.Handle` owner in the Go binding;
 - callback functions for InitialState, Entries, Term, FirstIndex, LastIndex,
@@ -78,6 +78,12 @@ define:
 - exact ownership for callback outputs;
 - error mapping and panic recovery;
 - destruction ordering that prevents callbacks after handle deletion.
+
+`raft_go_storage_ops_init` builds the callback table in C from the integer
+handle. `raft_raw_node_new` copies that table into the opaque RawNode, so it
+does not retain a pointer to the Go caller's temporary table. Focused Phase 5
+tests invoke all six callbacks through the C table without requiring the
+consensus core.
 
 The C constructor that begins real initialization must synchronously obtain
 HardState and ConfState. Arbitrary storage failures are fatal to that RawNode;
@@ -125,4 +131,3 @@ the alternate async storage protocol.
 Use table-driven Go/C differential tests for every invalid combination and
 default. Include integer conversion overflow, all reserved IDs, both read-only
 modes, zero/unlimited size semantics, and restart behavior for `Applied`.
-

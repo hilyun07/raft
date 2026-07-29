@@ -32,6 +32,27 @@ For Go-to-C input, C may borrow data only for the duration of the call. Any
 proposal, message, configuration context, or Ready identity retained after
 return must be copied into C-owned memory.
 
+## Go Storage callback output
+
+Storage results cross Go-to-C in the opposite call direction but obey the same
+owned-output rule. C stores only a `uintptr_t` `cgo.Handle` and a copied
+`raft_storage_ops_t`; it never stores a raw Go Storage pointer.
+
+- InitialState writes scalar HardState and allocates C-owned ConfState vectors.
+- Entries makes one callback per requested range and returns one C-owned
+  `raft_entry_t` vector with every Data payload deep-copied.
+- Term, FirstIndex, and LastIndex write only scalar outputs.
+- Snapshot returns one C-owned Snapshot/metadata/ConfState graph and one
+  deep-copied Data buffer.
+
+Nil versus empty Entry.Data and Snapshot.Data is preserved through
+`bool is_nil`. Partial allocation and panic paths recursively free/reset the
+owned result before returning an error. The C log/core that consumes a
+successful callback result must invoke the matching free function when done.
+The current compatibility bridge copies a large Snapshot.Data payload once
+into C-owned memory; future streaming or out-of-band work must retain the
+existing Go Ready/MsgSnap behavior.
+
 ## Progress observation ownership
 
 `RawNode.WithProgress` is observational and uses a separate owned-output

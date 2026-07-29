@@ -21,7 +21,7 @@ package raft
 #include <stdlib.h>
 #include "raft/raft.h"
 
-raft_storage_ops_t raft_go_storage_ops(uintptr_t handle);
+void raft_go_storage_ops_init(raft_storage_ops_t *ops, uintptr_t handle);
 */
 import "C"
 
@@ -61,6 +61,15 @@ const (
 // skeleton, but the binding, ownership, callback table, and error boundary are
 // real.
 func NewRawNode(config *Config) (*RawNode, error) {
+	return newRawNode(config, nil)
+}
+
+// newRawNode's optional observer is a narrow lifecycle-test seam. It observes
+// the opaque integer handle after creation without changing ownership; the
+// constructor still deletes that handle on every subsequent failure.
+func newRawNode(
+	config *Config, observeStorageHandle func(cgo.Handle),
+) (*RawNode, error) {
 	if config == nil {
 		return nil, fmt.Errorf("%w: nil Config", errCInvalidArgument)
 	}
@@ -74,7 +83,11 @@ func NewRawNode(config *Config) (*RawNode, error) {
 
 	bridge := &storageBridge{storage: config.Storage}
 	handle := cgo.NewHandle(bridge)
-	ops := C.raft_go_storage_ops(C.uintptr_t(handle))
+	if observeStorageHandle != nil {
+		observeStorageHandle(handle)
+	}
+	var ops C.raft_storage_ops_t
+	C.raft_go_storage_ops_init(&ops, C.uintptr_t(handle))
 	cc := C.raft_config_t{
 		id:                             C.uint64_t(config.ID),
 		election_tick:                  C.uint32_t(config.ElectionTick),

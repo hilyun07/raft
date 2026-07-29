@@ -89,6 +89,14 @@ Storage callbacks return storage-domain errors only:
 - any other error -> fatal, with Go diagnostic retained;
 - panic -> panic-from-Go-callback.
 
+The Phase 5 Go bridge implements and tests these mappings through the actual C
+callback table. A nil callback output pointer, nil ConfState from
+InitialState, nil Entry element, or nil Snapshot result is
+`RAFT_ERR_INVALID_ARGUMENT`. Allocation failure is
+`RAFT_ERR_OUT_OF_MEMORY`. Every panic is recovered in the exported callback,
+partial owned output is freed/reset, and the panic diagnostic is retained on
+the Go bridge when its handle is still valid.
+
 The C core must propagate callback failures to a public call or store a fatal
 node state that the next public call reports. It must not drop the error and
 continue participating in elections.

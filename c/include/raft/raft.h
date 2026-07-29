@@ -456,13 +456,13 @@ typedef int (*raft_storage_last_index_fn)(uintptr_t handle, uint64_t *index);
 typedef int (*raft_storage_snapshot_fn)(uintptr_t handle,
                                         raft_snapshot_t *snapshot);
 
-// The skeleton copies this callback table but does not invoke it. handle is an
-// opaque integer token suitable for runtime/cgo.Handle. It must never be a raw
-// Go pointer. Entry/Snapshot callback outputs use owned non-view types; the
-// exported Go callback deep-copies into C memory before returning and C frees
-// the result when done. entries returns one owned array per range callback,
-// never one Go callback per entry. The exact transfer/cleanup point will be
-// finalized with the Go bridge.
+// The RawNode copies this callback table; it never retains the caller's table
+// pointer. handle is an opaque integer token suitable for runtime/cgo.Handle
+// and must never be a raw Go pointer. Entry/Snapshot callback outputs use
+// owned non-view types: the exported Go callback deep-copies into C memory
+// before returning, and the C consumer frees the result with the matching
+// owned free function. entries returns one owned array per range callback,
+// never one Go callback per entry.
 typedef struct raft_storage_ops {
     uintptr_t handle;
     raft_storage_initial_state_fn initial_state;

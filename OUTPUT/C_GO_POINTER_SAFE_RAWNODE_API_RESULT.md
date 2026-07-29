@@ -189,11 +189,17 @@ entry. Callback allocation failure returns `RAFT_ERR_OUT_OF_MEMORY` after
 partial C cleanup, while callback panic remains
 `RAFT_ERR_PANIC_FROM_GO_CALLBACK`.
 
+Phase 5 exercises these rules through a C call-through harness for every
+callback. Pointer-bearing output descriptors live in C memory; the Go bridge
+deep-copies application results into their nested C-owned allocations.
+InitialState, Entries, and Snapshot reject invalid nil aggregate results, and
+all callback panics are recovered before returning to C.
+
 ## RawNode cgo-safety audit
 
 | RawNode method | Input kind | Go descriptor risk | Required safe path | Status |
 | --- | --- | --- | --- | --- |
-| NewRawNode | special/config + callbacks | Config is pointer-free; callback state would be risky as a raw Go pointer | Pointer-free config/table; `uintptr_t` `cgo.Handle`; C copies table | API safe; bridge Phase 4 |
+| NewRawNode | special/config + callbacks | Config is pointer-free; callback state would be risky as a raw Go pointer | Pointer-free config/table; `uintptr_t` `cgo.Handle`; C copies table | API safe; bridge implemented and tested in Phase 5 |
 | Bootstrap | aggregate | Peer array embeds byte pointers | One temporary C peer block, one Bootstrap call, immediate free | Documented/tested skeleton |
 | Tick | scalar | None | Direct call | Safe |
 | TickQuiesced | scalar | None | Direct call | Safe |

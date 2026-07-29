@@ -20,6 +20,22 @@ package raft
 #cgo CFLAGS: -I${SRCDIR}/c/include -I${SRCDIR}/c/src
 #include <stdlib.h>
 #include "raft/raft.h"
+
+int raft_go_storage_call_initial_state(uintptr_t handle,
+                                       raft_hard_state_t *hard_state,
+                                       raft_conf_state_t *conf_state);
+int raft_go_storage_call_entries(uintptr_t handle,
+                                 uint64_t lo,
+                                 uint64_t hi,
+                                 uint64_t max_size,
+                                 raft_entry_vec_t *entries);
+int raft_go_storage_call_term(uintptr_t handle,
+                              uint64_t index,
+                              uint64_t *term);
+int raft_go_storage_call_first_index(uintptr_t handle, uint64_t *index);
+int raft_go_storage_call_last_index(uintptr_t handle, uint64_t *index);
+int raft_go_storage_call_snapshot(uintptr_t handle,
+                                  raft_snapshot_t *snapshot);
 */
 import "C"
 
@@ -46,6 +62,12 @@ func (b *storageBridge) recordError(err error) {
 	b.mu.Lock()
 	b.lastErr = err
 	b.mu.Unlock()
+}
+
+func (b *storageBridge) recordedError() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastErr
 }
 
 func bridgeFromHandle(handle C.uintptr_t) *storageBridge {
@@ -162,6 +184,7 @@ func goRaftStorageInitialState(
 	*confState = C.raft_conf_state_t{}
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			*hardState = C.raft_hard_state_t{}
 			C.raft_conf_state_free(confState)
 			recordStorageCallbackPanic(handle, recovered)
 			result = C.RAFT_ERR_PANIC_FROM_GO_CALLBACK
@@ -174,10 +197,16 @@ func goRaftStorageInitialState(
 		bridge.recordError(err)
 		return storageErrorCode(err)
 	}
+	if cs == nil {
+		err := fmt.Errorf("raft/cgo: Storage.InitialState returned nil ConfState")
+		bridge.recordError(err)
+		return C.RAFT_ERR_INVALID_ARGUMENT
+	}
 	hardState.term = C.uint64_t(hs.GetTerm())
 	hardState.vote = C.uint64_t(hs.GetVote())
 	hardState.commit = C.uint64_t(hs.GetCommit())
 	if !copyConfStateToC(confState, cs) {
+		*hardState = C.raft_hard_state_t{}
 		return C.RAFT_ERR_OUT_OF_MEMORY
 	}
 	return C.RAFT_OK
@@ -223,6 +252,12 @@ func goRaftStorageEntries(
 	out.len = C.size_t(len(entries))
 	rows := unsafe.Slice(out.items, len(entries))
 	for i, entry := range entries {
+		if entry == nil {
+			C.raft_entry_vec_free(out)
+			err := fmt.Errorf("raft/cgo: Storage.Entries returned nil entry at offset %d", i)
+			bridge.recordError(err)
+			return C.RAFT_ERR_INVALID_ARGUMENT
+		}
 		if !copyEntryToC(&rows[i], entry) {
 			C.raft_entry_vec_free(out)
 			return C.RAFT_ERR_OUT_OF_MEMORY
@@ -324,8 +359,166 @@ func goRaftStorageSnapshot(
 		bridge.recordError(err)
 		return storageErrorCode(err)
 	}
+	if snapshot == nil {
+		err := fmt.Errorf("raft/cgo: Storage.Snapshot returned nil Snapshot")
+		bridge.recordError(err)
+		return C.RAFT_ERR_INVALID_ARGUMENT
+	}
 	if !copySnapshotToC(out, snapshot) {
 		return C.RAFT_ERR_OUT_OF_MEMORY
 	}
 	return C.RAFT_OK
+}
+
+// The helpers below drive the exported callbacks through the C callback
+// table. They keep pointer-bearing result descriptors in C memory and exist so
+// the bridge can be tested before the consensus core begins consuming
+// Storage. They are unexported and available only in the opt-in cgo build.
+
+func storageCallbackError(code int) error {
+	return decodeCError(C.int(code))
+}
+
+type storageInitialStateCallbackResult struct {
+	code      int
+	hardState *C.raft_hard_state_t
+	confState *C.raft_conf_state_t
+}
+
+func callStorageInitialState(handle cgo.Handle) storageInitialStateCallbackResult {
+	result := storageInitialStateCallbackResult{
+		hardState: (*C.raft_hard_state_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_hard_state_t{})))),
+		confState: (*C.raft_conf_state_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_conf_state_t{})))),
+	}
+	if result.hardState == nil || result.confState == nil {
+		result.code = int(C.RAFT_ERR_OUT_OF_MEMORY)
+		result.free()
+		return result
+	}
+	result.code = int(C.raft_go_storage_call_initial_state(
+		C.uintptr_t(handle), result.hardState, result.confState,
+	))
+	return result
+}
+
+func (r *storageInitialStateCallbackResult) values() (*pb.HardState, *pb.ConfState) {
+	return cHardState(r.hardState), cConfState(r.confState)
+}
+
+func (r *storageInitialStateCallbackResult) free() {
+	if r.confState != nil {
+		C.raft_conf_state_free(r.confState)
+		C.free(unsafe.Pointer(r.confState))
+		r.confState = nil
+	}
+	if r.hardState != nil {
+		C.free(unsafe.Pointer(r.hardState))
+		r.hardState = nil
+	}
+}
+
+type storageEntriesCallbackResult struct {
+	code    int
+	entries *C.raft_entry_vec_t
+}
+
+func callStorageEntries(
+	handle cgo.Handle, lo, hi, maxSize uint64,
+) storageEntriesCallbackResult {
+	result := storageEntriesCallbackResult{
+		entries: (*C.raft_entry_vec_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_entry_vec_t{})))),
+	}
+	if result.entries == nil {
+		result.code = int(C.RAFT_ERR_OUT_OF_MEMORY)
+		return result
+	}
+	result.code = int(C.raft_go_storage_call_entries(
+		C.uintptr_t(handle),
+		C.uint64_t(lo),
+		C.uint64_t(hi),
+		C.uint64_t(maxSize),
+		result.entries,
+	))
+	return result
+}
+
+func (r *storageEntriesCallbackResult) values() []*pb.Entry {
+	if r.entries == nil {
+		return nil
+	}
+	return cEntryVec(*r.entries)
+}
+
+func (r *storageEntriesCallbackResult) free() {
+	if r.entries == nil {
+		return
+	}
+	C.raft_entry_vec_free(r.entries)
+	C.free(unsafe.Pointer(r.entries))
+	r.entries = nil
+}
+
+func callStorageScalar(
+	handle cgo.Handle,
+	call func(*C.uint64_t) C.int,
+) (int, uint64) {
+	out := (*C.uint64_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.uint64_t(0)))))
+	if out == nil {
+		return int(C.RAFT_ERR_OUT_OF_MEMORY), 0
+	}
+	defer C.free(unsafe.Pointer(out))
+	code := int(call(out))
+	return code, uint64(*out)
+}
+
+func callStorageTerm(handle cgo.Handle, index uint64) (int, uint64) {
+	return callStorageScalar(handle, func(out *C.uint64_t) C.int {
+		return C.raft_go_storage_call_term(
+			C.uintptr_t(handle), C.uint64_t(index), out,
+		)
+	})
+}
+
+func callStorageFirstIndex(handle cgo.Handle) (int, uint64) {
+	return callStorageScalar(handle, func(out *C.uint64_t) C.int {
+		return C.raft_go_storage_call_first_index(C.uintptr_t(handle), out)
+	})
+}
+
+func callStorageLastIndex(handle cgo.Handle) (int, uint64) {
+	return callStorageScalar(handle, func(out *C.uint64_t) C.int {
+		return C.raft_go_storage_call_last_index(C.uintptr_t(handle), out)
+	})
+}
+
+type storageSnapshotCallbackResult struct {
+	code     int
+	snapshot *C.raft_snapshot_t
+}
+
+func callStorageSnapshot(handle cgo.Handle) storageSnapshotCallbackResult {
+	result := storageSnapshotCallbackResult{
+		snapshot: (*C.raft_snapshot_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_snapshot_t{})))),
+	}
+	if result.snapshot == nil {
+		result.code = int(C.RAFT_ERR_OUT_OF_MEMORY)
+		return result
+	}
+	result.code = int(C.raft_go_storage_call_snapshot(
+		C.uintptr_t(handle), result.snapshot,
+	))
+	return result
+}
+
+func (r *storageSnapshotCallbackResult) value() *pb.Snapshot {
+	return cSnapshot(r.snapshot)
+}
+
+func (r *storageSnapshotCallbackResult) free() {
+	if r.snapshot == nil {
+		return
+	}
+	C.raft_snapshot_free(r.snapshot)
+	C.free(unsafe.Pointer(r.snapshot))
+	r.snapshot = nil
 }

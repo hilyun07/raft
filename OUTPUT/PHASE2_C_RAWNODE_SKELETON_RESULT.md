@@ -329,10 +329,11 @@ without adding per-field or per-entry cgo builder calls.
 
 The constructor copies but does not invoke the table. The handle is documented
 as suitable for `runtime/cgo.Handle` and must not be a raw Go pointer.
-Exported Go callbacks must batch-copy Entries and Snapshot results into
-C-owned non-view graphs before returning. Entries is one array result per
-range callback, not one Go callback per entry; C frees owned callback results
-when finished.
+Phase 5 implements `raft_go_storage_ops_init`, all six exported Go callbacks,
+and a private C call-through harness used by bridge tests. Exported callbacks
+batch-copy Entries and Snapshot results into C-owned non-view graphs before
+returning. Entries is one array result per range callback, not one Go callback
+per entry; C frees owned callback results when finished.
 
 `raft_logger_ops_t` reserves an opaque handle plus log callback shape. The
 current RawNode does not accept, store, or call it. Logger/TraceLogger bridging
