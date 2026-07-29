@@ -1,6 +1,6 @@
 Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
 
-Now implement Phase 7 only: port quorum, progress tracking, and configuration change logic to C.
+Now implement Phase 8 only: port quorum, progress tracking, and configuration change logic to C.
 
 Goal:
 Complete the C equivalents of the Raft membership/progress layer so that the C RawNode can correctly track follower replication progress, compute quorum, and apply configuration changes.
@@ -127,7 +127,7 @@ Scope:
 * C-backed tests, for example `go test -tags crawnode ./...`,
 * any C unit tests added for this phase.
 
-12. Produce PHASE7_C_TRACKER_QUORUM_CONFCHANGE_RESULT.md summarizing:
+12. Produce PHASE8_C_TRACKER_QUORUM_CONFCHANGE_RESULT.md summarizing:
 
 * files changed,
 * tracker/progress components ported,

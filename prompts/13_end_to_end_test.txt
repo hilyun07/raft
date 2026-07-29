@@ -1,6 +1,6 @@
 Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
 
-Now implement Phase 12 only: wire the C-backed RawNode into the Go Node path and run end-to-end Node-level tests.
+Now implement Phase 13 only: wire the C-backed RawNode into the Go Node path and run end-to-end Node-level tests.
 
 Goal:
 Make the Go `Node` implementation use the C-backed Go `RawNode` binding under the selected build tag, while preserving the existing pure-Go implementation as the default.
@@ -147,7 +147,7 @@ Scope:
     * C-backed `go test -tags crawnode ./...` or the selected build tag;
     * targeted package tests with verbose output if failures occur.
 
-16. Produce PHASE12_C_BACKED_NODE_INTEGRATION_RESULT.md summarizing:
+16. Produce PHASE13_C_BACKED_NODE_INTEGRATION_RESULT.md summarizing:
 
     * files changed;
     * how build tags select pure-Go vs C-backed implementation;
