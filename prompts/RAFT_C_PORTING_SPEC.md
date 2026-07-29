@@ -71,6 +71,18 @@ Do not expose the internal struct layout in the public header.
 Provide C APIs corresponding semantically to Go `RawNode`:
 
 ```c
+typedef struct raft_byte_view {
+    const uint8_t *data;
+    size_t len;
+    bool is_nil;
+} raft_byte_view_t;
+
+typedef struct raft_bytes {
+    uint8_t *data;
+    size_t len;
+    bool is_nil;
+} raft_bytes_t;
+
 int raft_raw_node_new(const raft_config_t *cfg,
                       const raft_storage_ops_t *storage,
                       raft_raw_node_t **out);
@@ -80,26 +92,23 @@ void raft_raw_node_destroy(raft_raw_node_t *rn);
 void raft_raw_node_tick(raft_raw_node_t *rn);
 int raft_raw_node_campaign(raft_raw_node_t *rn);
 int raft_raw_node_propose(raft_raw_node_t *rn,
-                          const uint8_t *data,
-                          size_t len);
+                          const raft_byte_view_t *data);
 int raft_raw_node_propose_conf_change(raft_raw_node_t *rn,
-                                      const raft_conf_change_t *cc);
+                                      const raft_conf_change_v2_view_t *cc);
 int raft_raw_node_step(raft_raw_node_t *rn,
-                       const raft_message_t *msg);
+                       const raft_message_view_t *msg);
 
 bool raft_raw_node_has_ready(const raft_raw_node_t *rn);
 int raft_raw_node_ready(raft_raw_node_t *rn,
-                        raft_ready_t *out);
-int raft_raw_node_advance(raft_raw_node_t *rn,
-                          const raft_ready_t *rd);
+                        raft_ready_t **out);
+int raft_raw_node_advance(raft_raw_node_t *rn);
 
 int raft_raw_node_apply_conf_change(raft_raw_node_t *rn,
-                                    const raft_conf_change_t *cc,
+                                    const raft_conf_change_v2_view_t *cc,
                                     raft_conf_state_t *out);
 
 int raft_raw_node_read_index(raft_raw_node_t *rn,
-                             const uint8_t *ctx,
-                             size_t len);
+                             const raft_byte_view_t *ctx);
 
 int raft_raw_node_report_unreachable(raft_raw_node_t *rn,
                                       uint64_t id);
@@ -116,7 +125,7 @@ If the Go `Node` implementation needs the current Go split between `readyWithout
 
 ```c
 int raft_raw_node_ready_without_accept(raft_raw_node_t *rn,
-                                       raft_ready_t *out);
+                                       raft_ready_t **out);
 
 int raft_raw_node_accept_ready(raft_raw_node_t *rn,
                                const raft_ready_t *rd);
@@ -270,14 +279,26 @@ Be strict. Do not let C retain pointers to Go memory after a cgo call returns.
 
 For Go-to-C:
 
-* If C only reads during the call, passing pointer-free Go byte memory may be acceptable with care.
+* Public APIs do not pass structs by value. Use `const *_view_t *` for
+  pointer-bearing borrowed input. A null descriptor is invalid; Go nil is a
+  non-null descriptor with `is_nil = true`.
+* The Go binding must not allocate pointer-containing view descriptors in Go
+  memory. Call C scalar-part shims that construct the descriptor in C storage.
 * If C stores or uses data after the call, deep-copy into C-owned memory.
+* C-owned/internal/output bytes use `raft_bytes_t`; ownership is determined by
+  this non-view type, never by a flag or runtime kind. `is_nil` preserves Go
+  nil versus empty without dummy zero-length allocations.
+* Pointer-bearing aggregates follow the same split:
+  `raft_entry_view_t`/`raft_entry_t`,
+  `raft_snapshot_view_t`/`raft_snapshot_t`, and
+  `raft_message_view_t`/`raft_message_t`.
 * `Entries`, `Snapshot.Data`, `Entry.Data`, `Message.Context`, and other byte payloads must have explicit ownership.
 
 For C-to-Go:
 
 * Prefer deep-copying C `Ready`, `Message`, `Entry`, and `Snapshot` structures into Go protobuf types, then freeing the C structures.
-* Provide explicit `raft_ready_free`, `raft_message_free`, `raft_entry_vec_free`, and similar functions for C-owned allocations.
+* Provide explicit `raft_ready_destroy`, `raft_message_free`,
+  `raft_entry_vec_free`, and similar functions for C-owned allocations.
 * Avoid exposing C-owned memory to Go application code beyond a controlled conversion boundary.
 
 cgo pointer rules:
@@ -287,6 +308,31 @@ cgo pointer rules:
 * Delete handles only after the C raw node is destroyed and cannot call back anymore.
 * Do not delete a handle while callbacks may still be in flight.
 * Avoid passing Go values that contain Go pointers into C memory.
+
+Forbidden Go binding patterns:
+
+```go
+// Forbidden: Go-allocated descriptor containing a Go data pointer.
+v := C.raft_byte_view_t{/* data points into b */}
+C.raft_raw_node_propose(rn, &v)
+
+// Forbidden: Go-allocated aggregate descriptor graph.
+m := C.raft_message_view_t{/* pointer-bearing fields */}
+C.raft_raw_node_step(rn, &m)
+```
+
+Flat bytes call `*_from_parts`, which constructs the descriptor in C.
+Bootstrap, Step, and ConfChange use one temporary descriptor graph allocated
+with `C.malloc`/`C.calloc`, one RawNode cgo call, and immediate descriptor
+cleanup. Do not replace this with field-by-field builder cgo calls.
+
+Ready output is allocated in C, batch-copied into Go, and recursively freed
+once. `raft_raw_node_advance(rn)` tracks accepted Ready state internally and
+does not accept a reconstructed Ready descriptor.
+
+Storage callbacks deep-copy Entries/ConfState/Snapshot results into C-owned
+graphs before returning. `Entries` returns a batch array in one callback, not
+one callback per entry.
 
 Deadlock and reentrancy rules:
 
@@ -431,4 +477,3 @@ Acceptance criteria:
 11. etcd can build and run against the C-backed raft package.
 
 When unsure, prefer preserving existing semantics over simplifying the C API. Document any deviation from the current Go raft behavior before implementing it.
-

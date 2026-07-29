@@ -39,7 +39,7 @@ Scope:
 3. Port leadership transfer.
    Implement behavior for:
 
-   * `raft_raw_node_transfer_leadership`,
+   * `raft_raw_node_transfer_leader(rn, transferee)`,
    * `MsgTransferLeader`,
    * `MsgTimeoutNow`,
    * leader transfer target selection,
@@ -68,16 +68,23 @@ Scope:
 6. Update C public API if needed.
    Add or complete:
 
-   * `raft_raw_node_transfer_leadership`;
+   * `raft_raw_node_transfer_leader`;
    * `raft_raw_node_forget_leader`;
    * any status/getter fields required to observe transfer state.
 
 7. Update Go RawNode binding.
-   Map Go methods to C functions:
+   Map Go RawNode methods to C functions:
 
-   * `TransferLeader` / `TransferLeadership`, depending on current Go naming;
+   * `RawNode.TransferLeader(transferee)` to
+     `raft_raw_node_transfer_leader(rn, transferee)`;
    * `ForgetLeader`;
    * any status fields needed by Go `Node`.
+
+   Do not add `raft_raw_node_transfer_leadership(rn, lead, transferee)`.
+   `Node.TransferLeadership(ctx, lead, transferee)` remains in the Go
+   actor/channel layer. It constructs
+   `MsgTransferLeader{From: transferee, To: lead}` and submits that message
+   through `RawNode.Step` / `raft_raw_node_step`.
 
 8. Preserve Node API compatibility.
    Existing Go `Node.TransferLeadership(ctx, lead, transferee)` and `Node.ForgetLeader(ctx)` behavior should remain compatible.
@@ -142,4 +149,3 @@ Scope:
 
 Important:
 Do not simplify these features by weakening their safety/liveness semantics. These paths are subtle. Prefer matching the current Go implementation exactly.
-

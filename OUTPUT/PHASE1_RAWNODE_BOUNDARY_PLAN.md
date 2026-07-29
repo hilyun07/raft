@@ -290,3 +290,18 @@ Finally, a source-level check should confirm that `node.go` contains no
 `rn.raft`, no retained `*raft`, no direct tracker access, no direct
 `applyConfChange`, no direct `getStatus`, and no direct read of private RawNode
 fields.
+
+## C-port follow-up additions
+
+Phase 1 successfully made the Go Node actor depend on RawNode semantics, but
+the later C ABI must track more than the methods directly used by `node.run`.
+The complete audit is now in
+`OUTPUT/RAWNODE_API_PARITY_FOR_C_PORT.md`.
+
+In particular, the C surface must include Bootstrap and deprecated
+TickQuiesced, distinguish BasicStatus from allocating full Status, and provide
+an explicit progress enumeration equivalent to WithProgress. Full
+`Status.Progress` is not a replacement for WithProgress because Go populates
+the former only on leaders while the latter visits tracked replicas on all
+roles. The Phase 1 `ID`, `HasProgress`, and async-mode requirements remain
+scalar/cache-friendly binding requirements.

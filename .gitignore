@@ -1,3 +1,4 @@
 .idea
 .gocache
 .gocache/*
+c/.build/

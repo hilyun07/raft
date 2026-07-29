@@ -133,3 +133,14 @@ ok  	go.etcd.io/raft/v3/tracker	0.004s
 The alternate `TMPDIR` was used because the baseline documented that the
 default root-backed temporary filesystem was full. The temporary directory was
 removed after verification.
+
+## Later C-boundary follow-up
+
+The Go-only refactor is still complete, but a subsequent API audit identified
+C-parity work that is outside Phase 1. The C skeleton/binding must additionally
+cover Bootstrap, TickQuiesced, BasicStatus, full Status, and a distinct
+WithProgress mapping. See `OUTPUT/RAWNODE_API_PARITY_FOR_C_PORT.md` and
+`OUTPUT/C_PORT_TRACKING_GAPS.md`.
+
+No change to the completed Phase 1 Go implementation is implied by this
+documentation follow-up.

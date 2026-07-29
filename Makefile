@@ -26,3 +26,11 @@ verify-genproto:
 .PHONY: test
 test:
 	PASSES="unit" ./scripts/test.sh $(GO_TEST_FLAGS)
+
+.PHONY: test-c
+test-c:
+	$(MAKE) -C c test
+
+.PHONY: clean-c
+clean-c:
+	$(MAKE) -C c clean

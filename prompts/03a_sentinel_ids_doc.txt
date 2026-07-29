@@ -1,0 +1,72 @@
+Read RAFT_C_PORTING_SPEC.md and inspect the current etcd-io/raft source.
+
+Do not implement code yet.
+
+Task: document all raft node-id sentinel values and make them explicit for the C port.
+
+Create a new file:
+
+SENTINEL_NODE_IDS_FOR_C_PORT.md
+
+In this file, cover the following.
+
+1. Define the node-id sentinel constants used by the Go raft implementation:
+
+   * None == 0
+   * LocalAppendThread
+   * LocalApplyThread
+
+2. Explain the invariant:
+
+   * real raft node IDs must never be 0
+   * real raft node IDs must never equal LocalAppendThread or LocalApplyThread
+   * Config validation currently enforces these restrictions
+
+3. Find and list all important uses of None == 0 in the production code, especially:
+
+   * raft.lead == None meaning no known leader
+   * raft.Vote == None meaning not voted in the current term
+   * raft.leadTransferee == None meaning no active leadership transfer
+   * Message.From == None meaning unset/local-origin depending on path
+   * Message.To == None meaning no outbound target or empty response depending on path
+   * becomeFollower(term, None)
+   * ForgetLeader setting the known leader to None
+   * ReadIndex handling of req.From == None
+   * send path filling Message.From when it is None
+
+4. Clearly distinguish node-id sentinel 0 from other zero values:
+
+   * MessageType enum value 0 is not None
+   * EntryType enum value 0 is not None
+   * Term == 0 is not necessarily a node-id sentinel
+   * Index == 0 is not necessarily a node-id sentinel
+   * empty or zero snapshot metadata is not the same as None
+
+5. Propose C names and definitions, for example:
+
+   * RAFT_NONE
+   * RAFT_LOCAL_APPEND_THREAD
+   * RAFT_LOCAL_APPLY_THREAD
+
+6. Propose C helper functions/macros:
+
+   * raft_is_none_id(id)
+   * raft_is_local_target_id(id)
+   * raft_is_valid_node_id(id)
+
+7. Propose validation rules for the C public API:
+
+   * Config.ID must reject RAFT_NONE and local target IDs
+   * peer IDs must reject RAFT_NONE and local target IDs
+   * membership change IDs must reject RAFT_NONE and local target IDs where appropriate
+   * `raft_raw_node_transfer_leader` transferee == RAFT_NONE should be
+     discussed carefully:
+
+     * Go raft core may treat unknown/invalid transferee as no-op/drop
+     * C public API may return RAFT_ERR_INVALID_ARGUMENT for clearer API behavior
+     * but differential tests may require preserving Go-compatible no-op behavior inside the core
+
+8. Propose comments to place near the C constants so future contributors do not mistake every numeric zero for None.
+
+9. Do not change production code in this task.
+   Only create the documentation file and, if helpful, propose a follow-up patch plan.

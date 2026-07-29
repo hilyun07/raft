@@ -950,6 +950,31 @@ func BenchmarkStatus(b *testing.B) {
 	}
 }
 
+func TestRawNodeWithProgressReturnsCopiesWithoutInflights(t *testing.T) {
+	rn := newTestRawNode(
+		1, 3, 1, newTestMemoryStorage(withPeers(1, 2)),
+	)
+	rn.raft.trk.Progress[1].Match = 7
+	rn.raft.trk.Progress[2].Match = 11
+	rn.raft.trk.Progress[2].IsLearner = true
+
+	seen := map[uint64]ProgressType{}
+	rn.WithProgress(func(id uint64, typ ProgressType, pr tracker.Progress) {
+		seen[id] = typ
+		require.Nil(t, pr.Inflights)
+		pr.Match = 99 // Mutating the visitor copy must not change tracker state.
+	})
+
+	require.Equal(t, map[uint64]ProgressType{
+		1: ProgressTypePeer,
+		2: ProgressTypeLearner,
+	}, seen)
+	require.Equal(t, uint64(7), rn.raft.trk.Progress[1].Match)
+	require.Equal(t, uint64(11), rn.raft.trk.Progress[2].Match)
+	require.NotNil(t, rn.raft.trk.Progress[1].Inflights)
+	require.NotNil(t, rn.raft.trk.Progress[2].Inflights)
+}
+
 func TestRawNodeConsumeReady(t *testing.T) {
 	// Check that readyWithoutAccept() does not call acceptReady (which resets
 	// the messages) but Ready() does.
