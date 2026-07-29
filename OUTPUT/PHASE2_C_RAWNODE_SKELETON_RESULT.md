@@ -461,3 +461,13 @@ This confirms that the default Go path remains pure-Go and unaffected.
 - role-independent progress enumeration;
 - async local storage message handling;
 - build-tagged C backend enablement and differential tests.
+
+## Phase 7 follow-up
+
+The symbols and ownership hooks established here are now backed by a minimal
+C raft state machine for bootstrap, ticking, elections, normal proposals,
+basic vote/append/heartbeat Step handling, synchronous Ready/Advance, status,
+and copied progress snapshots. The earlier stub descriptions remain a record
+of Phase 2, not current runtime behavior. Advanced calls still returning
+`RAFT_ERR_NOT_IMPLEMENTED` are enumerated in
+`PHASE7_C_RAFT_CORE_MINIMAL_RESULT.md`.

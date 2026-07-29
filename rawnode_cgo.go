@@ -57,9 +57,9 @@ const (
 	ProgressTypeLearner
 )
 
-// NewRawNode instantiates the opt-in C-backed RawNode. The C core is still a
-// skeleton, but the binding, ownership, callback table, and error boundary are
-// real.
+// NewRawNode instantiates the opt-in C-backed RawNode. The C core implements
+// the Phase 7 election/replication subset; advanced raft features remain
+// explicit unsupported operations.
 func NewRawNode(config *Config) (*RawNode, error) {
 	return newRawNode(config, nil)
 }

@@ -135,3 +135,17 @@ the alternate async storage protocol.
 Use table-driven Go/C differential tests for every invalid combination and
 default. Include integer conversion overflow, all reserved IDs, both read-only
 modes, zero/unlimited size semantics, and restart behavior for `Applied`.
+
+## Phase 7 implementation status
+
+The C constructor now consumes `InitialState`, applies `Applied`, and
+normalizes zero `MaxCommittedSizePerReady`, `MaxUncommittedEntriesSize`, and
+`MaxInflightBytes` consistently with the documented rules. The minimal core
+uses election/heartbeat ticks, `MaxSizePerMsg`,
+`MaxUncommittedEntriesSize`, and `DisableProposalForwarding`.
+
+`MaxInflightMsgs` and `MaxInflightBytes` are validated and retained but are not
+yet active because full inflights/flow control is deferred. `PreVote`,
+`CheckQuorum`, lease reads, and `AsyncStorageWrites` are rejected with
+`RAFT_ERR_NOT_IMPLEMENTED`. This prevents a configuration from appearing
+accepted while running weaker semantics.

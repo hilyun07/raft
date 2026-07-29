@@ -198,3 +198,16 @@ raft_raw_node_step
 `raft_raw_node_step_for_node` is the Go Node actor helper and must not call the
 public function. The Node actor performs its own routing/filtering and invokes
 the lower-level helper so legitimate local/internal messages are not rejected.
+
+## Phase 7 implementation status
+
+The minimal core preserves storage callback error codes, returns
+`RAFT_ERR_PROPOSAL_DROPPED` for leaderless/disabled forwarding and basic
+uncommitted-size overflow, and implements both public Step errors.
+Unsupported advanced message/config paths return
+`RAFT_ERR_NOT_IMPLEMENTED`; invalid descriptors and public IDs return
+`RAFT_ERR_INVALID_ARGUMENT`; allocation failures remain distinct.
+
+Errors reached through the void `raft_raw_node_tick` entry point are stored as
+a sticky core error and returned by the next error-returning RawNode operation.
+No C path invokes Go `Panicf` or allows a callback panic to cross the ABI.

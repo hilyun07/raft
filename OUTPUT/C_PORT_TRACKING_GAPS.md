@@ -71,3 +71,24 @@ appear: public C API, Go binding, C core, tests, or documentation.
   supported.
 - Run memory tools and cgo pointer checks.
 - Verify every RawNode API row in `RAWNODE_API_PARITY_FOR_C_PORT.md`.
+
+## Phase 7 closure and remaining gaps
+
+Phase 7 closes the basic election/replication slice: simple voters, vote
+counting, Match/Next replication, follower append/heartbeat handling,
+leader proposals, synchronous Ready/Advance, meaningful status/progress
+snapshots, bootstrap, and public/internal Step layering.
+
+The following previously grouped “Phase 7” items remain deliberately open and
+must not be inferred from the minimal implementation:
+
+- ConfChangeV2, joint consensus, learner promotion/removal, and the special
+  zero-NodeID application path;
+- full tracker state, inflight message/byte windows, optimistic pipelining,
+  quorum package parity, and randomized election timeouts;
+- ReadIndex, CheckQuorum, PreVote, lease reads, leadership transfer, snapshot
+  send/restore, and asynchronous storage writes;
+- raftpb scalar presence completeness and Go-vs-C trace differentials.
+
+The constructor or operation returns `RAFT_ERR_NOT_IMPLEMENTED` where silently
+approximating these features would be unsafe.

@@ -341,3 +341,21 @@ Phases 3 and 6 should add allocation/failure tests that:
 - verify synchronous persistence-before-send ordering;
 - verify asynchronous same-target ordering and response gating;
 - run under ASan/UBSan where available and exercise Go's cgo pointer checks.
+
+## Phase 7 synchronous Ready status
+
+The minimal C core now returns C-owned Ready graphs containing SoftState and
+HardState deltas, unstable entries/snapshot, committed entries, and a
+deep-copied outbound message queue. `MustSync` is true for unstable entries or
+term/vote changes and intentionally ignores commit-only changes.
+
+Accepting Ready records stable-entry, stable-snapshot, and applying completion
+metadata inside the opaque RawNode; it also advances unstable/applying
+in-progress markers and drains the message queue. The Go binding deep-copies
+the C Ready, destroys the output graph, and later calls the no-argument C
+`raft_raw_node_advance`. Advance uses only the C-owned completion metadata, so
+no Go reconstruction of `raft_ready_t` is passed back to C.
+
+This phase supports the synchronous Ready/Advance path only. The
+AsyncStorageWrites message/response protocol and snapshot transport completion
+remain deferred.

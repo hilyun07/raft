@@ -327,3 +327,13 @@ Passed.
 
 These gaps are deferred because addressing them would broaden Phase 6 beyond
 the log/unstable/storage-backed subsystem.
+
+## Phase 7 follow-up
+
+Phase 7 now consumes this subsystem from `c/src/raft_core.c`. RawNode
+construction calls Storage `InitialState`, loads HardState/ConfState, applies
+`Config.Applied`, and initializes the minimal state machine. Ready/Advance now
+uses the unstable, committed, accept-in-progress, stable, and applied helpers.
+The Phase 6 bullets above remain the historical state at completion of that
+phase; current implementation status is recorded in
+`PHASE7_C_RAFT_CORE_MINIMAL_RESULT.md`.

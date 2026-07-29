@@ -309,3 +309,11 @@ Passed.
   the one-copy compatibility bridge.
 - End-to-end callback use by elections, log restoration, Ready, and snapshot
   transport remains tied to the later C consensus/log phases.
+
+## Phase 7 follow-up
+
+The C RawNode constructor now invokes the existing `InitialState` callback
+once, consumes its C-owned HardState/ConfState output, and frees the ConfState
+graph. Log reads during election and replication continue through the same
+batched callback table. No raw Go pointer is stored by the C core; the storage
+handle remains an opaque `uintptr_t`.

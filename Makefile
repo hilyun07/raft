@@ -31,6 +31,10 @@ test:
 test-c:
 	$(MAKE) -C c test
 
+.PHONY: test-c-sanitize
+test-c-sanitize:
+	$(MAKE) -C c test-sanitize
+
 .PHONY: test-cgo-raft
 test-cgo-raft:
 	CGO_ENABLED=1 go test -tags=cgo_raft ./...

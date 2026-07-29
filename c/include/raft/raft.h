@@ -348,8 +348,8 @@ typedef struct raft_ready {
     raft_entry_vec_t committed_entries;
     raft_message_vec_t messages;
     bool must_sync;
-    // Reserved for associating preview/accept/advance without depending on
-    // pointers into freed Ready output. Callers must not interpret this token.
+    // Associates preview/accept/advance without depending on pointers into
+    // freed Ready output. Callers must not interpret or modify this token.
     uint64_t opaque_token;
 } raft_ready_t;
 
@@ -543,14 +543,14 @@ void raft_raw_node_destroy(raft_raw_node_t *raw_node);
 //   backing arrays only during that call. C never retains a view pointer.
 // Field-by-field builder calls are intentionally not part of this skeleton.
 
-// tick and tick_quiesced are inert in this skeleton because their required
-// public signatures have no error return. They must not be mistaken for
-// implemented clock semantics until the C core phase.
+// Phase 7 implements deterministic election/heartbeat ticking. Fatal,
+// allocation, or callback errors reached through this void API become sticky
+// and are returned by the next error-returning RawNode operation.
 void raft_raw_node_tick(raft_raw_node_t *raw_node);
 void raft_raw_node_tick_quiesced(raft_raw_node_t *raw_node);
 
-// Except where noted below, valid calls to the following consensus-dependent
-// skeleton operations return RAFT_ERR_NOT_IMPLEMENTED.
+// Bootstrap, campaign, and normal proposals have minimal Phase 7 semantics.
+// ConfChangeV2 proposal/application remains explicitly unimplemented.
 int raft_raw_node_bootstrap(raft_raw_node_t *raw_node,
                             const raft_peer_view_t *peers,
                             size_t peer_count);
@@ -578,8 +578,8 @@ int raft_raw_node_step(raft_raw_node_t *raw_node,
 int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
                                 const raft_message_view_t *message);
 
-// The skeleton has no pending work and returns false. Later Ready phases must
-// implement every Ready source before enabling the C backend.
+// Reports Phase 7 SoftState, HardState, unstable entries/snapshot, committed
+// entries, and queued outbound message work.
 bool raft_raw_node_has_ready(const raft_raw_node_t *raw_node);
 // These functions return a C-owned outer descriptor and nested graph. A Go
 // binding converts the complete graph in one batch and calls
@@ -610,8 +610,7 @@ int raft_raw_node_read_index_from_parts(raft_raw_node_t *raw_node,
                                         size_t len,
                                         bool is_nil);
 
-// Basic/full status safely report the inert allocated skeleton state and
-// return RAFT_OK. Full status has empty configuration and progress.
+// Basic/full status return a point-in-time copy of the minimal C core state.
 int raft_raw_node_basic_status(const raft_raw_node_t *raw_node,
                                raft_basic_status_t *status);
 int raft_raw_node_status(const raft_raw_node_t *raw_node,
@@ -623,14 +622,11 @@ int raft_raw_node_status(const raft_raw_node_t *raw_node,
 // *out == NULL and *out_len == 0. The caller owns a non-empty returned array
 // and releases it with raft_progress_snapshot_array_free.
 //
-// The skeleton resets outputs and returns RAFT_ERR_NOT_IMPLEMENTED rather than
-// pretending that its unimplemented tracker is empty.
 int raft_raw_node_progress_snapshot(const raft_raw_node_t *raw_node,
                                     raft_progress_snapshot_t **out,
                                     size_t *out_len);
 // Scalar boundary query used by the Go Node actor after membership changes.
-// It never exposes a live Progress pointer. The skeleton has no tracker and
-// returns false.
+// It never exposes a live Progress pointer.
 bool raft_raw_node_has_progress(const raft_raw_node_t *raw_node, uint64_t id);
 
 int raft_raw_node_report_unreachable(raft_raw_node_t *raw_node, uint64_t id);

@@ -8,14 +8,17 @@ PUBLIC_INCLUDE := include
 PRIVATE_INCLUDE := src
 WARNINGS := -Wall -Wextra -Werror -Wpedantic
 STANDARD := -std=c11
+SANITIZER_CFLAGS ?= -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
 
 LIBRARY := $(BUILD_DIR)/libraft_c.a
 OBJECTS := \
 	$(BUILD_DIR)/unstable.o \
 	$(BUILD_DIR)/log.o \
+	$(BUILD_DIR)/raft_core.o \
 	$(BUILD_DIR)/raw_node.o
 TEST_BINARIES := \
 	$(BUILD_DIR)/raw_node_skeleton_test \
+	$(BUILD_DIR)/raft_core_test \
 	$(BUILD_DIR)/unstable_test \
 	$(BUILD_DIR)/log_test
 
@@ -33,7 +36,11 @@ $(BUILD_DIR)/log.o: src/log.c src/log.h src/unstable.h include/raft/raft.h | $(B
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/raw_node.o: src/raw_node.c src/raft_internal.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/raft_core.o: src/raft_core.c src/raft_core.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
+		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
+
+$(BUILD_DIR)/raw_node.o: src/raw_node.c src/raft_internal.h src/raft_core.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
@@ -41,6 +48,10 @@ $(LIBRARY): $(OBJECTS)
 	$(AR) rcs $@ $(OBJECTS)
 
 $(BUILD_DIR)/raw_node_skeleton_test: tests/raw_node_skeleton_test.c include/raft/raft.h $(LIBRARY)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
+		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
+
+$(BUILD_DIR)/raft_core_test: tests/raft_core_test.c include/raft/raft.h $(LIBRARY)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
 
@@ -55,8 +66,16 @@ $(BUILD_DIR)/log_test: tests/log_test.c src/log.h src/unstable.h include/raft/ra
 .PHONY: test
 test: $(TEST_BINARIES)
 	$(BUILD_DIR)/raw_node_skeleton_test
+	$(BUILD_DIR)/raft_core_test
 	$(BUILD_DIR)/unstable_test
 	$(BUILD_DIR)/log_test
+
+.PHONY: test-sanitize
+test-sanitize:
+	$(MAKE) clean
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+	$(MAKE) test CFLAGS='$(SANITIZER_CFLAGS)'
 
 .PHONY: clean
 clean:

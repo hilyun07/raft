@@ -83,6 +83,8 @@ static raft_config_t test_config(void) {
         .id = 1,
         .election_tick = 10,
         .heartbeat_tick = 1,
+        .max_size_per_message = UINT64_MAX,
+        .max_committed_size_per_ready = UINT64_MAX,
         .max_inflight_messages = 1,
         .read_only_option = RAFT_READ_ONLY_SAFE,
     };
@@ -164,7 +166,7 @@ static void test_wire_enum_values(void) {
     assert(RAFT_SNAPSHOT_FAILURE == 2);
 }
 
-static void test_lifecycle_and_stubs(void) {
+static void test_lifecycle_and_minimal_core(void) {
     const uint8_t byte = 1;
     raft_config_t config = test_config();
     raft_storage_ops_t storage = test_storage();
@@ -174,7 +176,6 @@ static void test_lifecycle_and_stubs(void) {
         .context = {NULL, 0, true},
     };
     raft_ready_t *ready = NULL;
-    raft_ready_t *accepted_ready = calloc(1, sizeof(*accepted_ready));
     raft_basic_status_t basic_status = {0};
     raft_status_t status = {0};
     raft_conf_change_v2_view_t conf_change = {
@@ -198,10 +199,8 @@ static void test_lifecycle_and_stubs(void) {
 
     assert(raft_raw_node_new(&config, &storage, &raw_node) == RAFT_OK);
     assert(raw_node != NULL);
-    assert(accepted_ready != NULL);
     assert(!raft_raw_node_has_ready(raw_node));
 
-    raft_raw_node_tick(raw_node);
     raft_raw_node_tick_quiesced(raw_node);
 
     assert(raft_raw_node_basic_status(raw_node, &basic_status) == RAFT_OK);
@@ -216,32 +215,8 @@ static void test_lifecycle_and_stubs(void) {
     assert(status.progress == NULL);
     assert(status.progress_len == 0);
 
-    assert(raft_raw_node_bootstrap(raw_node, &peer, 1) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
-    assert(raft_raw_node_campaign(raw_node) == RAFT_ERR_NOT_IMPLEMENTED);
-    assert(raft_raw_node_propose(
-               raw_node, &(raft_byte_view_t){&byte, 1, 0}) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
-    assert(raft_raw_node_propose(raw_node, nil_view()) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+    // Advanced Phase 7 operations remain explicit stubs.
     assert(raft_raw_node_propose_conf_change(raw_node, &conf_change) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
-    // Public RawNode.Step rejects a locally generated message whose sender is
-    // not a local target. The Node actor helper intentionally bypasses that
-    // public validation and reaches the inert core stub.
-    assert(raft_raw_node_step(raw_node, &message) ==
-           RAFT_ERR_STEP_LOCAL_MSG);
-    assert(raft_raw_node_step_for_node(raw_node, &message) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
-    assert(raft_raw_node_ready(raw_node, &ready) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
-    assert(ready == NULL);
-    assert(raft_raw_node_ready_without_accept(raw_node, &ready) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
-    assert(ready == NULL);
-    assert(raft_raw_node_accept_ready(raw_node, accepted_ready) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
-    assert(raft_raw_node_advance(raw_node) ==
            RAFT_ERR_NOT_IMPLEMENTED);
     assert(raft_raw_node_apply_conf_change(raw_node, &conf_change,
                                            &conf_state) ==
@@ -249,18 +224,51 @@ static void test_lifecycle_and_stubs(void) {
     assert(raft_raw_node_read_index(
                raw_node, &(raft_byte_view_t){&byte, 1, 0}) ==
            RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_transfer_leader(raw_node, 2) ==
+           RAFT_ERR_NOT_IMPLEMENTED);
+
+    assert(raft_raw_node_bootstrap(raw_node, &peer, 1) == RAFT_OK);
+    assert(raft_raw_node_has_progress(raw_node, 1));
+    assert(raft_raw_node_campaign(raw_node) == RAFT_OK);
+    assert(raft_raw_node_propose(
+               raw_node, &(raft_byte_view_t){&byte, 1, 0}) ==
+           RAFT_OK);
+    assert(raft_raw_node_propose(raw_node, nil_view()) == RAFT_OK);
+    assert(raft_raw_node_has_ready(raw_node));
+
+    // Public RawNode.Step rejects a locally generated message whose sender is
+    // not a local target. The Node actor helper intentionally bypasses it.
+    assert(raft_raw_node_step(raw_node, &message) ==
+           RAFT_ERR_STEP_LOCAL_MSG);
+    assert(raft_raw_node_step_for_node(raw_node, &message) == RAFT_OK);
+
+    assert(raft_raw_node_ready_without_accept(raw_node, &ready) == RAFT_OK);
+    assert(ready != NULL);
+    assert(ready->entries.len >= 3);
+    assert(ready->committed_entries.len >= 3);
+    assert(ready->has_hard_state);
+    assert(ready->hard_state.term == 2);
+    assert(ready->hard_state.vote == 1);
+    assert(ready->hard_state.commit >= 3);
+    assert(ready->has_soft_state);
+    assert(ready->soft_state.raft_state == RAFT_STATE_LEADER);
+    assert(raft_raw_node_accept_ready(raw_node, ready) == RAFT_OK);
+    raft_ready_destroy(ready);
+    ready = NULL;
+    assert(raft_raw_node_advance(raw_node) == RAFT_OK);
+
     assert(raft_raw_node_read_index(raw_node, nil_view()) ==
            RAFT_ERR_NOT_IMPLEMENTED);
     assert(raft_raw_node_progress_snapshot(raw_node, &snapshots,
-                                           &snapshot_len) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
-    assert(snapshots == NULL);
-    assert(snapshot_len == 0);
-    assert(!raft_raw_node_has_progress(raw_node, 1));
-    assert(raft_raw_node_forget_leader(raw_node) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
-    assert(raft_raw_node_transfer_leader(raw_node, 2) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+                                           &snapshot_len) == RAFT_OK);
+    assert(snapshots != NULL);
+    assert(snapshot_len == 1);
+    assert(snapshots[0].id == 1);
+    assert(snapshots[0].type == RAFT_PROGRESS_PEER);
+    raft_progress_snapshot_array_free(snapshots, snapshot_len);
+    snapshots = NULL;
+    snapshot_len = 0;
+    assert(raft_raw_node_forget_leader(raw_node) == RAFT_OK);
     // Go Node.TransferLeadership routes this message through the Node actor
     // helper; it does not require a separate two-ID C RawNode function.
     assert(raft_raw_node_step_for_node(raw_node, &transfer_message) ==
@@ -272,7 +280,6 @@ static void test_lifecycle_and_stubs(void) {
            RAFT_ERR_NOT_IMPLEMENTED);
 
     raft_ready_destroy(ready);
-    raft_ready_destroy(accepted_ready);
     raft_status_free(&status);
     raft_conf_state_free(&conf_state);
     raft_raw_node_destroy(raw_node);
@@ -410,8 +417,7 @@ static void test_node_id_boundary_validation(void) {
            RAFT_ERR_STEP_LOCAL_MSG);
     message.from = RAFT_LOCAL_APPEND_THREAD;
     message.to = RAFT_LOCAL_APPLY_THREAD;
-    assert(raft_raw_node_step(raw_node, &message) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_step(raw_node, &message) == RAFT_OK);
 
     for (i = 0; i < sizeof(reserved_ids) / sizeof(reserved_ids[0]); ++i) {
         change.node_id = reserved_ids[i];
@@ -494,9 +500,9 @@ static void test_nil_empty_validation(void) {
         &(raft_bytes_t){(uint8_t *)(uintptr_t)&byte, 1, true}));
 
     assert(raft_raw_node_propose(raw_node, &empty_view) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_PROPOSAL_DROPPED);
     assert(raft_raw_node_propose(raw_node, nil_view()) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_PROPOSAL_DROPPED);
     assert(raft_raw_node_propose(
                raw_node, &(raft_byte_view_t){NULL, 1, 0}) ==
            RAFT_ERR_INVALID_ARGUMENT);
@@ -505,9 +511,9 @@ static void test_nil_empty_validation(void) {
                &(raft_byte_view_t){&byte, 1, true}) ==
            RAFT_ERR_INVALID_ARGUMENT);
     assert(raft_raw_node_propose_from_parts(raw_node, NULL, 0, true) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_PROPOSAL_DROPPED);
     assert(raft_raw_node_propose_from_parts(raw_node, NULL, 0, false) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_PROPOSAL_DROPPED);
     assert(raft_raw_node_propose_from_parts(raw_node, NULL, 1, false) ==
            RAFT_ERR_INVALID_ARGUMENT);
 
@@ -525,8 +531,7 @@ static void test_nil_empty_validation(void) {
     assert(raft_raw_node_read_index_from_parts(raw_node, NULL, 1, false) ==
            RAFT_ERR_INVALID_ARGUMENT);
 
-    assert(raft_raw_node_bootstrap(raw_node, &peer, 1) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_bootstrap(raw_node, &peer, 1) == RAFT_OK);
     peer.context.data = (const uint8_t *)&peer.id;
     peer.context.len = 1;
     peer.context.is_nil = true;
@@ -662,8 +667,7 @@ static void test_temporary_aggregate_descriptors(void) {
     peers[0].id = 1;
     peers[0].context =
         (raft_byte_view_t){context, sizeof(context), false};
-    assert(raft_raw_node_bootstrap(raw_node, peers, 1) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_bootstrap(raw_node, peers, 1) == RAFT_OK);
 
     conf_change->change.type = RAFT_CONF_CHANGE_ADD_NODE;
     conf_change->change.node_id = 2;
@@ -685,15 +689,14 @@ static void test_temporary_aggregate_descriptors(void) {
     message->entry.data =
         (raft_byte_view_t){entry_data, sizeof(entry_data), false};
     message->value.type = RAFT_MSG_APP;
-    message->value.from = 1;
-    message->value.to = 2;
-    message->value.term = 1;
+    message->value.from = 2;
+    message->value.to = 1;
+    message->value.term = 2;
     message->value.entries =
         (raft_entry_view_vec_t){&message->entry, 1};
     message->value.context =
         (raft_byte_view_t){context, sizeof(context), false};
-    assert(raft_raw_node_step(raw_node, &message->value) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_step(raw_node, &message->value) == RAFT_OK);
 
     // Invalid borrowed nesting is rejected and every temporary allocation can
     // still be released directly; view free functions intentionally do not
@@ -769,7 +772,7 @@ static void test_free_functions(void) {
 int main(void) {
     test_node_id_sentinels();
     test_wire_enum_values();
-    test_lifecycle_and_stubs();
+    test_lifecycle_and_minimal_core();
     test_invalid_arguments();
     test_node_id_boundary_validation();
     test_nil_empty_validation();

@@ -191,3 +191,13 @@ Go cgo binding.
   an exported Go callback from C.
 
 These are implementation-stage gaps, not unresolved API-design questions.
+
+## Phase 7 follow-up
+
+`raft_raw_node_progress_snapshot` now returns a C-owned point-in-time array of
+the minimal tracker's voter/learner rows. Each row copies Match, Next, state,
+pending snapshot, activity, pause, and learner scalars; it exposes no inflights
+queue or internal pointer. The tagged Go `WithProgress` still makes one C call,
+converts rows, forces `tracker.Progress.Inflights = nil`, invokes the visitor
+in Go, and frees the array once. Tests also mutate a returned row and verify a
+later snapshot is unaffected.

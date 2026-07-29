@@ -17,11 +17,12 @@
 #include "raft/raft.h"
 #include "_cgo_export.h"
 
-// The C skeleton lives in a separate subtree so default pure-Go builds never
-// require a C compiler. This tagged translation unit incorporates it only for
-// the opt-in cgo binding build.
+// The C implementation lives in a separate subtree so default pure-Go builds
+// never require a C compiler. This tagged translation unit incorporates it
+// only for the opt-in cgo binding build.
 #include "unstable.c"
 #include "log.c"
+#include "raft_core.c"
 #include "raw_node.c"
 
 void raft_go_storage_ops_init(raft_storage_ops_t *ops, uintptr_t handle) {
@@ -39,9 +40,9 @@ void raft_go_storage_ops_init(raft_storage_ops_t *ops, uintptr_t handle) {
     };
 }
 
-// These small call-through helpers exercise the actual C callback table
-// without requiring the still-inert consensus core. They are intentionally
-// private to the tagged Go binding and are not part of raft/raft.h.
+// These small call-through helpers exercise the actual C callback table.
+// They are intentionally private to the tagged Go binding and are not part
+// of raft/raft.h.
 int raft_go_storage_call_initial_state(uintptr_t handle,
                                        raft_hard_state_t *hard_state,
                                        raft_conf_state_t *conf_state) {

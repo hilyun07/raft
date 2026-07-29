@@ -136,3 +136,19 @@ TMPDIR=$PWD/.tmp GOTMPDIR=$PWD/.tmp GOCACHE=$PWD/.gocache go test ./...
 ```
 
 Passed for all default pure-Go packages. The default build remains pure Go.
+
+## Phase 7 implementation status
+
+The documented direction is now implemented:
+
+```text
+raft_raw_node_step
+  -> public local-message and unknown-response-peer validation
+  -> raft_raw_node_step_for_node
+       -> raft_core_step
+```
+
+The lower-level helper never calls the public function and therefore accepts
+Node-internal `MsgHup` routing that the public boundary rejects. The public
+unknown-response check now uses the minimal progress map. C tests exercise
+both paths.

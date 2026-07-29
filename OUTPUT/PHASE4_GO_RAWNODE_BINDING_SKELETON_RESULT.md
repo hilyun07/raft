@@ -321,3 +321,13 @@ compiled with `-Wall -Wextra -Werror -Wpedantic` and its test binary passed.
 - The pure-Go semantic suites are intentionally excluded under `cgo_raft`
   while the C core is inert. Each later core phase must add C-backed parity
   tests and can re-enable applicable shared tests as semantics become real.
+
+## Phase 7 follow-up
+
+The tagged binding now runs the minimal C core rather than an inert state
+holder. Its existing single-shot aggregate conversion, flat-byte shims,
+C-owned Ready conversion, no-argument Advance, and progress snapshot path are
+unchanged. Tagged tests now cover bootstrap, single-node election/proposal,
+Ready persistence/Advance, status, and Go-side WithProgress visitation.
+Advanced public methods remain present but surface the C core's explicit
+not-implemented result.

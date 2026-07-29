@@ -15,19 +15,37 @@
 #ifndef ETCD_RAFT_RAFT_INTERNAL_H
 #define ETCD_RAFT_RAFT_INTERNAL_H
 
-#include "log.h"
+#include "raft_core.h"
 
 enum {
-    RAFT_RAW_NODE_ABI_VERSION = 10,
+    RAFT_RAW_NODE_ABI_VERSION = 11,
 };
 
+typedef struct raft_ready_completion {
+    bool has_stable_entry;
+    uint64_t stable_index;
+    uint64_t stable_term;
+    bool has_stable_snapshot;
+    uint64_t stable_snapshot_index;
+    bool has_applied;
+    uint64_t applied_index;
+    uint64_t applied_size;
+    uint64_t applied_payload_size;
+} raft_ready_completion_t;
+
 // The public header intentionally exposes only typedef struct raft_raw_node.
-// Consensus state will replace or extend this private skeleton in later phases.
 struct raft_raw_node {
     uint32_t abi_version;
     raft_config_t config;
     raft_storage_ops_t storage;
     raft_log_t log;
+    raft_t raft;
+
+    raft_soft_state_t previous_soft_state;
+    raft_hard_state_t previous_hard_state;
+    uint64_t ready_generation;
+    bool ready_accepted;
+    raft_ready_completion_t completion;
 };
 
 #endif  // ETCD_RAFT_RAFT_INTERNAL_H

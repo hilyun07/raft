@@ -1,184 +1,579 @@
-Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
+Read the current repository state and all C porting documents/results that already exist.
 
-Now implement Phase 6 only: port the core Raft state machine to C, enough to support basic election, append replication, and Ready generation.
+This is Phase 7: implement the first minimally working C raft core state machine.
+
+Assume previous phases have already been requested/applied, including:
+
+* Phase 1 Go Node/RawNode boundary cleanup,
+* Phase 2 C RawNode public API skeleton,
+* type-separated payload API,
+* C/Go pointer-safe RawNode API,
+* WithProgress C progress snapshot design,
+* removal of `raft_raw_node_transfer_leadership`,
+* `raft_raw_node_step` / `raft_raw_node_step_for_node` layering documentation,
+* Phase 4 Go RawNode binding skeleton,
+* Phase 5 Go-backed Storage callback bridge,
+* Phase 6 C `raftLog` / `unstable` / storage-backed log subsystem.
+
+Before editing code, inspect the current files and docs. In particular, read any of the following files if they exist:
+
+```text
+RAFT_C_PORTING_SPEC.md
+PORTING_BASELINE.md
+PHASE1_RAWNODE_BOUNDARY_PLAN.md
+PHASE1_RAWNODE_BOUNDARY_RESULT.md
+C_PORT_FOLLOWUP_DOCS_RESULT.md
+SENTINEL_NODE_IDS_FOR_C_PORT.md
+RAWNODE_API_PARITY_FOR_C_PORT.md
+CONFIG_FIELDS_FOR_C_PORT.md
+RAFTPB_WIRE_COMPAT_FOR_C_PORT.md
+READY_OWNERSHIP_FOR_C_PORT.md
+ERROR_MAPPING_FOR_C_PORT.md
+C_PORT_TRACKING_GAPS.md
+PHASE2_C_RAWNODE_SKELETON_RESULT.md
+C_TYPE_SEPARATED_PAYLOAD_API_RESULT.md
+C_GO_POINTER_SAFE_RAWNODE_API_RESULT.md
+WITH_PROGRESS_C_PORT_AUDIT_RESULT.md
+TRANSFER_LEADERSHIP_API_CLEANUP_RESULT.md
+STEP_FOR_NODE_LAYERING_DOC_UPDATE_RESULT.md
+PHASE4_GO_RAWNODE_BINDING_SKELETON_RESULT.md
+PHASE5_STORAGE_CALLBACK_BRIDGE_RESULT.md
+PHASE6_C_RAFT_LOG_SUBSYSTEM_RESULT.md
+```
+
+If some files are missing, do not fail. Record which were missing in the result document.
+
+Reference version:
+
+* Use etcd-io/raft v3.7.0 semantics.
+* Inspect the Go implementation of:
+
+  * `raft.go`
+  * `rawnode.go`
+  * `node.go`, only for Step routing semantics
+  * `log.go`
+  * `storage.go`
+  * `tracker` / `quorum` only as much as needed for this phase
+  * tests covering basic elections, campaign, append, heartbeat, proposal, Ready, and Step behavior.
 
 Goal:
-Implement the C equivalent of the core `raft` state machine on top of the C log subsystem from Phase 5.
 
-Do not attempt to complete every advanced feature in this phase. Focus on correctness for the basic Raft loop:
+Implement the first minimally working C raft core state machine on top of the C log subsystem from Phase 6.
 
-* tick,
-* election,
-* vote/pre-vote if supported,
-* become follower/candidate/leader,
-* append entries,
-* heartbeat,
-* message send queue,
-* basic Ready output.
+This phase should make the C RawNode path capable of basic Raft behavior:
 
-Scope:
+* initialize a C raft node from `raft_config_t`,
+* load HardState and ConfState from `raft_storage_ops_t.InitialState`,
+* initialize the C log from Storage,
+* tick election and heartbeat timers,
+* campaign and become candidate/leader,
+* request votes and count votes for simple voter configurations,
+* append no-op entry on leadership,
+* accept client proposals on leader,
+* reject/drop proposals appropriately on non-leader according to current skeleton policy,
+* send basic `MsgApp`, `MsgAppResp`, `MsgHeartbeat`, `MsgHeartbeatResp`, `MsgVote`, `MsgVoteResp`, and local `MsgHup` handling,
+* produce Ready data through existing C RawNode ready path,
+* preserve public Step versus Node-internal Step distinction:
 
-1. Port or implement C equivalents of the core raft state:
+  * `raft_raw_node_step` = public RawNode.Step validation,
+  * `raft_raw_node_step_for_node` = lower-level node/internal `r.Step` path.
 
-   * node id,
-   * term,
-   * vote,
-   * lead,
-   * raft state type,
-   * election elapsed,
-   * heartbeat elapsed,
-   * election timeout,
-   * heartbeat timeout,
-   * randomized election timeout if present,
-   * check quorum flags if needed,
-   * pre-vote flags if supported,
-   * raft log pointer,
-   * outgoing messages,
-   * messages-after-append queue,
-   * read states placeholder if needed.
+Do not attempt to complete all advanced raft features in this phase. Specifically defer or keep skeleton behavior for:
 
-2. Implement role transitions:
-
-   * become follower,
-   * become candidate,
-   * become pre-candidate if current implementation supports pre-vote,
-   * become leader.
-
-3. Implement ticking:
-
-   * follower/candidate election tick,
-   * leader heartbeat tick,
-   * generation of local campaign/heartbeat events.
-
-4. Implement basic message stepping:
-
-   * `MsgHup`,
-   * `MsgBeat`,
-   * `MsgProp`,
-   * `MsgApp`,
-   * `MsgAppResp`,
-   * `MsgVote`,
-   * `MsgVoteResp`,
-   * `MsgPreVote`,
-   * `MsgPreVoteResp`,
-   * `MsgHeartbeat`,
-   * `MsgHeartbeatResp`.
-
-5. Implement basic append replication:
-
-   * leader appends proposal entries to local log,
-   * leader sends append messages to followers,
-   * follower validates prev log index/term,
-   * follower appends entries,
-   * follower sends append response,
-   * leader updates follower progress enough to commit replicated entries.
-
-6. Implement basic quorum commit:
-
-   * track follower match indexes,
-   * advance commit index when quorum has replicated an entry from the current term,
-   * expose committed entries through Ready.
-
-7. Implement outgoing message queues:
-
-   * normal `Messages`,
-   * `msgsAfterAppend` or equivalent delayed-send semantics,
-   * preserve the safety rule that messages depending on persistent state are not released before storage append is accepted.
-
-8. Implement minimal integration with C RawNode:
-
-   * `raft_raw_node_tick`,
-   * `raft_raw_node_campaign`,
-   * `raft_raw_node_propose`,
-   * `raft_raw_node_step`,
-   * `raft_raw_node_has_ready`,
-   * `raft_raw_node_ready` or `ready_without_accept`,
-   * `raft_raw_node_accept_ready`,
-   * `raft_raw_node_advance`.
-
-9. Preserve Ready/Advance semantics:
-
-   * entries returned in Ready are not considered stable until accepted/advanced according to the existing design,
-   * committed entries are exposed in order,
-   * messages-after-append are released only after the relevant append persistence is accepted,
-   * `MustSync` is calculated consistently with the Go implementation.
-
-10. Preserve Storage callback rules:
-
-* C raft core may call storage through the C storage callback ABI,
-* never retain Go-owned memory,
-* deep-copy if data must outlive the callback,
-* propagate storage errors correctly.
-
-11. Do not implement advanced features yet unless required by tests:
-
-* full snapshot send/restore,
-* leadership transfer,
-* ReadIndex,
+* full ProgressTracker inflights and flow control,
+* joint consensus / full ConfChangeV2,
+* learners and learner promotion semantics beyond safe basic recognition,
+* ReadIndex correctness,
+* leadership transfer completion,
+* snapshot restore/send pipeline beyond log-level helpers already implemented,
+* AsyncStorageWrites full behavior,
+* CheckQuorum and PreVote if not already simple to implement safely,
 * lease-based reads,
+* TraceLogger / TLA build behavior.
+
+If a feature is required for a basic test to compile but not yet semantically implemented, return the documented `RAFT_ERR_NOT_IMPLEMENTED`, drop/no-op only where Go semantics allow, and record it as deferred.
+
+Core scope for this phase:
+
+1. C raft state object
+
+Implement or complete the internal `raft_t` object.
+
+It should include, semantically:
+
+* node id,
+* current term,
+* vote,
+* lead,
+* state: follower / candidate / leader / pre-candidate if implemented,
+* raft log pointer,
+* message queue,
+* read states queue if currently skeleton-only,
+* election timeout,
+* heartbeat timeout,
+* randomized election timeout if the repo has randomization support,
+* election elapsed,
+* heartbeat elapsed,
+* votes map or simple vote tracking structure,
+* current voters set sufficient for simple majority,
+* basic progress map for voters if already present, or minimal internal progress needed for append replication,
+* config flags from v3.7.0:
+
+  * CheckQuorum,
+  * PreVote,
+  * ReadOnlyOption,
+  * DisableProposalForwarding,
+  * MaxSizePerMsg,
+  * MaxUncommittedEntriesSize,
+  * MaxInflightMsgs,
+  * MaxInflightBytes,
+  * MaxCommittedSizePerReady,
+  * AsyncStorageWrites,
+  * Applied.
+
+Use the repository’s existing type names and layout if already established.
+
+2. Initialization
+
+Implement C equivalent of `newRaft(c *Config)` to the minimum needed for this phase.
+
+Requirements:
+
+* validate config fields according to existing C config validation docs,
+* reject `ID == RAFT_NONE`,
+* require non-nil storage ops,
+* call `Storage.InitialState`,
+* initialize `raftLog` from Storage,
+* load HardState:
+
+  * term,
+  * vote,
+  * commit,
+* initialize committed/applied state consistently with `Config.Applied`,
+* initialize voters from ConfState or bootstrap path,
+* initialize progress for known voters if progress tracking exists,
+* set initial state to follower,
+* set `lead = RAFT_NONE`,
+* preserve logger handling policy already chosen:
+
+  * Go wrapper owns Go `Logger`,
+  * C core may use no-op/stderr/optional logger ops,
+  * do not call Go Panicf/Fatalf directly from C.
+
+3. State transitions
+
+Implement basic equivalents of:
+
+* `becomeFollower(term, lead)`,
+* `becomeCandidate()`,
+* `becomeLeader()`.
+
+Requirements:
+
+* term and vote updates must follow Go semantics.
+* becoming leader must append an empty no-op entry for the new term.
+* leader should initialize its own progress as matched to last index.
+* follower lead should become `RAFT_NONE` when unknown.
+* do not allow invalid state transitions to silently corrupt state.
+
+4. Ticking
+
+Implement:
+
+* `raft_raw_node_tick`,
+* `raft_raw_node_tick_quiesced`, if currently skeleton-only, with safe minimal behavior,
+* internal election tick,
+* internal heartbeat tick.
+
+Basic behavior:
+
+* follower/candidate election tick increments election elapsed and triggers `MsgHup` when timeout elapses.
+* leader heartbeat tick sends heartbeats when heartbeat timeout elapses.
+* heartbeat messages should use current committed index where appropriate.
+
+If randomized election timeout is not fully implemented, use a deterministic safe value and document the limitation. Prefer matching Go behavior if existing helpers already support randomness.
+
+5. Step handling
+
+Implement minimal internal `raft_step` or equivalent.
+
+Required message handling for this phase:
+
+* `MsgHup`:
+
+  * starts election/campaign,
+  * increments term as candidate,
+  * votes for self,
+  * sends vote requests to voters,
+  * becomes leader immediately in single-node quorum.
+* `MsgVote`:
+
+  * grants/rejects vote based on term, vote state, and log up-to-date check.
+* `MsgVoteResp`:
+
+  * records votes,
+  * becomes leader on quorum,
+  * becomes follower on quorum rejection if matching Go semantics for this basic path.
+* `MsgProp`:
+
+  * leader appends proposed entries to its log,
+  * leader broadcasts append to followers,
+  * non-leader behavior must follow current design:
+
+    * forward to leader if proposal forwarding is supported and leader known,
+    * otherwise return/drop with documented error.
+* `MsgApp`:
+
+  * follower checks prev log index/term,
+  * appends entries if matching,
+  * advances commit up to leader commit,
+  * replies with `MsgAppResp`.
+* `MsgAppResp`:
+
+  * leader updates minimal follower progress,
+  * advances commit when quorum matched,
+  * sends more append if needed.
+* `MsgHeartbeat`:
+
+  * follower updates leader,
+  * advances commit safely,
+  * replies with `MsgHeartbeatResp`.
+* `MsgHeartbeatResp`:
+
+  * leader may send append if follower is behind; minimal safe behavior is acceptable.
+* `MsgBeat`:
+
+  * leader broadcasts heartbeat.
+* local/internal messages needed by `ReportUnreachable` / `ReportSnapshot` may remain skeleton unless tests require them.
+
+Preserve `raft_raw_node_step` versus `raft_raw_node_step_for_node` layering:
+
+* `raft_raw_node_step` should perform public RawNode.Step validation and then delegate to `raft_raw_node_step_for_node`.
+* `raft_raw_node_step_for_node` should call the internal raft step path directly.
+* `raft_raw_node_step_for_node` must not call `raft_raw_node_step`.
+
+6. Log interaction
+
+Use the Phase 6 log subsystem instead of reimplementing log logic inside raft state machine.
+
+Required use:
+
+* `lastIndex`,
+* `lastTerm`,
+* `term`,
+* `isUpToDate`,
+* `maybeAppend`,
+* `append`,
+* `maybeCommit`,
+* `commitTo`,
+* `nextCommittedEnts`,
+* `unstableEntries`,
+* `stableTo`,
+* `stableSnapTo`.
+
+Do not bypass `raftLog` invariants.
+
+7. Message queue and Ready integration
+
+Implement or complete C message queue handling.
+
+Requirements:
+
+* raft core appends outgoing messages to a C-owned message queue.
+* `raft_raw_node_ready` / `ready_without_accept` should expose messages through `Ready.Messages`.
+* `acceptReady` should drain or mark messages consistent with Go semantics.
+* messages must be C-owned and deep-copied as needed.
+* entry and snapshot payload ownership must follow type-separated payload rules.
+* do not retain Go pointers.
+
+`Ready` should now become meaningfully populated for basic tests:
+
+* SoftState changes if SoftState is implemented,
+* HardState when term/vote/commit changes,
+* Entries from unstable log,
+* CommittedEntries from raftLog,
+* Messages from outbound queue,
+* MustSync computed correctly:
+
+  * entries exist,
+  * term changed,
+  * vote changed,
+  * not commit-only.
+
+8. HardState / SoftState
+
+Implement or complete:
+
+* current HardState extraction,
+* SoftState extraction,
+* empty-state comparison helpers if not already implemented,
+* prevHardState / prevSoftState tracking in RawNode.
+
+Requirements:
+
+* term, vote, commit must be correct.
+* `Ready.HardState` should be non-empty when HardState changes.
+* `Ready.MustSync` must not compare commit.
+* `Ready.SoftState` should report lead and raft state when changed, if SoftState is already part of C Ready.
+
+9. Basic progress / quorum
+
+This phase needs enough progress/quorum behavior to support:
+
+* single-node election and commit,
+* simple multi-node vote quorum,
+* basic leader append replication and commit.
+
+Do not implement full v3.7.0 `tracker.ProgressTracker` yet if that is scheduled for a later phase, but do not fake quorum unsafely.
+
+Minimum acceptable behavior:
+
+* maintain a voter id list,
+* maintain vote granted/rejected state,
+* calculate majority as `voter_count/2 + 1`,
+* maintain basic `match` and `next` per voter for leader append commit,
+* expose `raft_raw_node_has_progress(id)` accurately for known voters,
+* make `WithProgress` progress snapshot return meaningful basic progress rows if the C progress map exists.
+
+Document exactly which full tracker features remain deferred:
+
+* inflights,
+* probe/replicate/snapshot states,
+* learners,
 * joint consensus,
-* async storage writes,
-* full tracker optimization,
-* log compaction edge cases beyond what the log subsystem already supports.
+* max inflight bytes,
+* optimistic pipelining.
 
-12. Testing:
-    Add C-backed tests for a minimal cluster simulation.
+10. Proposal behavior
 
-Test at least:
+Implement leader proposal append for normal entries.
 
-* single-node election,
-* three-node election,
-* vote rejection based on stale log,
-* leader appends proposal,
-* follower accepts append,
-* follower rejects append with wrong prev log term/index,
-* leader handles append response,
-* quorum commit,
-* committed entries appear in Ready,
-* Ready entries are marked stable only after Advance,
-* messages are generated to the correct peers,
-* messages-after-append are not released too early,
-* step with higher term causes follower transition,
-* step with lower term is rejected/ignored as in Go implementation.
+Requirements:
 
-13. Differential testing:
-    If practical, add tests that run the same scripted message sequence against:
+* reject empty proposal entries only if Go does,
+* preserve entry data ownership,
+* set entry term/index correctly,
+* append to unstable log,
+* update own match index,
+* attempt commit for single-node quorum immediately,
+* broadcast append for multi-node.
 
-* existing pure-Go RawNode,
-* C-backed RawNode,
-  and compare:
-* HardState,
-* SoftState,
-* Ready entries,
-* committed entries,
-* outbound message types and targets,
-* leader/term/state.
+If MaxUncommittedEntriesSize is not fully implemented yet, document as deferred or implement the basic check if the log subsystem already has size helpers.
 
-14. Default behavior:
+11. Bootstrap integration
 
-* The default pure-Go raft implementation must remain unchanged.
-* C-backed behavior remains behind the existing build tag.
-* Existing default `go test ./...` must pass.
+If `raft_raw_node_bootstrap` already appends initial config changes and initializes membership, ensure the new raft state machine can use that membership for quorum/progress.
 
-15. Build-tagged validation:
-    Run:
+If bootstrap is still skeleton-only, implement only what is needed for:
 
-* default `go test ./...`,
-* C-backed tests, for example `go test -tags crawnode ./...`,
-* any C unit tests added for this phase.
+* single-node bootstrap,
+* simple multi-node initial voters,
+* committed bootstrap confchange entries visible through Ready if the existing design requires it.
 
-16. Produce PHASE6_C_RAFT_CORE_RESULT.md summarizing:
+Do not implement full ConfChangeV2 in this phase unless already present.
 
-* files changed,
-* C raft core structs added,
+12. Error mapping
+
+Use `ERROR_MAPPING_FOR_C_PORT.md`.
+
+Preserve distinct errors:
+
+* `RAFT_ERR_STEP_LOCAL_MSG`,
+* `RAFT_ERR_STEP_PEER_NOT_FOUND_OR_IGNORED`,
+* `RAFT_ERR_PROPOSAL_DROPPED`,
+* storage compacted/unavailable/snapshot unavailable,
+* invalid argument,
+* out of memory,
+* fatal invariant failure.
+
+Do not collapse errors into generic fatal unless unavoidable. Document any unavoidable gap.
+
+13. Tests
+
+Add focused C unit tests for the minimal raft core.
+
+Use the repository’s C test framework and Makefile targets.
+
+At minimum, cover:
+
+A. Initialization
+
+* new raft rejects ID 0.
+* new raft loads HardState term/vote/commit.
+* new raft initializes log from storage.
+* new raft starts as follower with no leader.
+
+B. Election
+
+* single-node campaign becomes leader.
+* leader appends no-op entry on election.
+* multi-node candidate sends `MsgVote`.
+* candidate becomes leader after quorum vote responses.
+* candidate rejects/steps down on higher term message.
+
+C. Vote handling
+
+* follower grants vote when term is current/new and log is up-to-date.
+* follower rejects stale term vote.
+* follower rejects candidate with stale log.
+
+D. Proposal
+
+* leader appends proposed entry.
+* single-node leader commits proposal.
+* follower/non-leader proposal behavior matches documented current policy.
+
+E. AppendEntries
+
+* follower accepts matching append.
+* follower rejects append with mismatched prev log term/index.
+* follower advances commit to leader commit safely.
+* leader handles successful append response and advances commit with quorum.
+
+F. Heartbeat
+
+* leader tick emits heartbeat.
+* follower heartbeat response is produced.
+* heartbeat updates known leader.
+
+G. Ready
+
+* Ready contains unstable entries after campaign/proposal.
+* Ready contains committed entries after commit.
+* Ready contains outgoing messages after vote/app/heartbeat.
+* Ready.MustSync is true for entries/term/vote changes.
+* commit-only Ready does not force MustSync.
+* Advance does not require passing Ready back to C.
+
+H. Step layering
+
+* public `raft_raw_node_step` rejects local messages.
+* `raft_raw_node_step_for_node` accepts the corresponding internal/local path where appropriate.
+* `raft_raw_node_step` delegates to `raft_raw_node_step_for_node`, not the reverse.
+
+I. Progress helper
+
+* `raft_raw_node_has_progress(id)` returns true for known voters.
+* returns false for unknown ids.
+* does not expose internal progress pointers.
+* progress snapshot, if implemented, reports basic match/next/type.
+
+Add Go/cgo tests only if the C-backed path can run them without requiring unimplemented higher-level features. Otherwise keep tests at the C unit level and document cgo limitations.
+
+14. Differential guidance
+
+If feasible, add a small deferred plan or TODO for future Go-vs-C differential tests:
+
+* single-node election/propose/ready traces,
+* three-node election traces,
+* append rejection and conflict cases,
+* HardState/Ready equivalence.
+
+Do not build a large differential harness in this phase unless the repository already has infrastructure.
+
+15. Documentation updates
+
+Update relevant docs/results to state:
+
+* C raft core now has a minimal state machine.
+* Implemented scope:
+
+  * follower/candidate/leader transitions,
+  * basic vote/election,
+  * basic append/proposal,
+  * basic heartbeat,
+  * basic Ready population.
+* Deferred scope:
+
+  * full tracker/inflights,
+  * quorum package parity,
+  * ConfChangeV2/joint consensus,
+  * learners,
+  * ReadIndex,
+  * leadership transfer completion,
+  * snapshots beyond log-level support,
+  * AsyncStorageWrites full semantics,
+  * CheckQuorum/PreVote if deferred.
+* `raft_raw_node_step_for_node` remains the internal node path and `raft_raw_node_step` remains public RawNode path.
+* no Go pointers are retained.
+* storage-backed log access still goes through `raft_storage_ops_t`.
+
+Build/test commands:
+
+Run formatting on changed Go files:
+
+```bash
+gofmt -w <changed-go-files>
+```
+
+Run C formatting if the repository has a documented formatter. Do not introduce a new formatter requirement if none exists.
+
+Run C tests:
+
+```bash
+make test-c
+```
+
+or the repository’s existing C test target.
+
+Run sanitizer tests if supported:
+
+```bash
+make test-c-sanitize
+```
+
+If sanitizer runtime is unavailable, record it as an environment limitation. If sanitizer findings appear, fix them or document exact unresolved findings.
+
+Run default Go tests:
+
+```bash
+go test ./...
+```
+
+If `/tmp` space is a problem:
+
+```bash
+mkdir -p .tmp .gocache
+TMPDIR=$PWD/.tmp GOTMPDIR=$PWD/.tmp GOCACHE=$PWD/.gocache go test ./...
+```
+
+Run the C-backed target:
+
+```bash
+make test-cgo-raft
+```
+
+If `make test-cgo-raft` fails because features explicitly deferred in this phase are not implemented, distinguish:
+
+* failures in the minimal raft core that must be fixed now,
+* expected failures from deferred features.
+
+Deliverable:
+
+Create or update:
+
+```text
+PHASE7_C_RAFT_CORE_MINIMAL_RESULT.md
+```
+
+Include:
+
+* files inspected,
+* existing docs/results used,
+* C files changed/created,
+* raft state machine functions implemented,
+* RawNode methods that now have real behavior,
 * message types implemented,
-* role transitions implemented,
-* Ready/Advance integration status,
-* tests added,
-* differential test status,
-* known deviations from Go behavior,
-* remaining features to port.
+* election behavior implemented,
+* proposal/append behavior implemented,
+* Ready integration status,
+* progress/quorum minimal implementation status,
+* ownership and memory safety notes,
+* error mapping,
+* tests added/updated,
+* commands run and results,
+* sanitizer results,
+* remaining gaps,
+* deferred work for the next phase.
 
-Important:
-This phase must prioritize safety and semantic equivalence over completeness. Keep the implementation small enough to review. Do not attempt to port every feature in one pass.
-
+Do not broaden this task beyond the minimal C raft core state machine unless required to fix directly related compile errors.

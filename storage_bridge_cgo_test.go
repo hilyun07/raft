@@ -417,15 +417,15 @@ func TestCGoRawNodeInitializesLogFromStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rn.destroy()
-	if storage.callStats.firstIndex != 1 || storage.callStats.lastIndex != 1 {
+	if storage.callStats.firstIndex != 1 || storage.callStats.lastIndex != 3 {
 		t.Fatalf(
-			"log constructor calls = first:%d last:%d, want 1 each",
+			"RawNode initialization calls = first:%d last:%d, want 1 and 3",
 			storage.callStats.firstIndex,
 			storage.callStats.lastIndex,
 		)
 	}
-	if storage.callStats.initialState != 0 {
-		t.Fatalf("log constructor called InitialState %d times", storage.callStats.initialState)
+	if storage.callStats.initialState != 1 {
+		t.Fatalf("RawNode initialization called InitialState %d times, want 1", storage.callStats.initialState)
 	}
 }
 
