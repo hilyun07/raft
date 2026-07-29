@@ -267,6 +267,13 @@ is one of these local targets (`rawnode.go:139-142`,
 `node.go:485-488`). `RawNode.Step` also exempts local-target senders from the
 normal “known peer” check for response messages (`rawnode.go:149-152`).
 
+The C boundary keeps public and actor paths distinct:
+`raft_raw_node_step` applies public `RawNode.Step` validation and delegates to
+`raft_raw_node_step_for_node`, while the Go `node.run` path calls
+`raft_raw_node_step_for_node` directly. The lower-level helper must not call
+the public function, because locally generated messages and local-target
+storage responses are valid on the actor path.
+
 These IDs are valid internal message endpoints only in the prescribed
 storage-message directions. They are never valid values for `Config.ID`,
 cluster membership, a transport peer, a vote, a known leader, or a

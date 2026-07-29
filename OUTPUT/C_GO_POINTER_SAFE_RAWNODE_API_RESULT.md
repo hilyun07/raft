@@ -157,8 +157,8 @@ The future C RawNode tracks the accepted Ready internally, matching current Go
 RawNode behavior. Go does not reconstruct or pass Ready back. This safety
 change advanced the private skeleton ABI marker to version 6. The subsequent
 explicit progress-snapshot API rename advanced it to 7, and removal of the
-redundant two-ID leadership-transfer declaration leaves the current marker at
-version 8.
+redundant two-ID leadership-transfer declaration advanced it to 8. The Phase
+4 Node-boundary helper additions leave the current marker at version 9.
 
 ## Output conversion
 
@@ -220,7 +220,10 @@ partial C cleanup, while callback panic remains
 Go `Node.TransferLeadership(ctx, lead, transferee)` is not a second C
 RawNode API. The Go actor constructs
 `MsgTransferLeader{From: transferee, To: lead}` and sends the resulting
-aggregate through the existing single-shot `raft_raw_node_step` path.
+aggregate through the existing single-shot
+`raft_raw_node_step_for_node` path. Public `RawNode.Step` and external C
+callers instead use `raft_raw_node_step`, which validates and delegates to
+that lower-level helper.
 
 - Propose and ReadIndex use one `*_from_parts` cgo call each.
 - Tick, TickQuiesced, Campaign, HasReady, Advance, reporting, transfer, and

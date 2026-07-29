@@ -93,7 +93,7 @@ The contract is:
 
 The private skeleton ABI marker moved from 6 to 7 for the public symbol/type
 rename. The later leadership-transfer API cleanup moves the current marker to
-8.
+8, and the Phase 4 Node-boundary helpers move it to 9.
 
 ## Future Go C-backed implementation
 

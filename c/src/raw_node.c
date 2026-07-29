@@ -125,6 +125,23 @@ static bool message_type_valid(raft_message_type_t type) {
     return type >= RAFT_MSG_HUP && type <= RAFT_MSG_FORGET_LEADER;
 }
 
+static bool message_type_is_local(raft_message_type_t type) {
+    switch (type) {
+        case RAFT_MSG_HUP:
+        case RAFT_MSG_BEAT:
+        case RAFT_MSG_UNREACHABLE:
+        case RAFT_MSG_SNAP_STATUS:
+        case RAFT_MSG_CHECK_QUORUM:
+        case RAFT_MSG_STORAGE_APPEND:
+        case RAFT_MSG_STORAGE_APPEND_RESP:
+        case RAFT_MSG_STORAGE_APPLY:
+        case RAFT_MSG_STORAGE_APPLY_RESP:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static bool entry_type_valid(raft_entry_type_t type) {
     return type >= RAFT_ENTRY_NORMAL && type <= RAFT_ENTRY_CONF_CHANGE_V2;
 }
@@ -750,9 +767,27 @@ int raft_raw_node_step(raft_raw_node_t *raw_node,
     if (raw_node == NULL || !raft_message_view_valid(message)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
+    if (message_type_is_local(message->type) &&
+        !raft_is_local_target_id(message->from)) {
+        return RAFT_ERR_STEP_LOCAL_MSG;
+    }
     // Message IDs require message-aware validation. RAFT_NONE is valid for
     // documented local-origin paths, and RAFT_LOCAL_* is valid for matching
     // asynchronous-storage messages. Do not apply a blanket member-ID check.
+    //
+    // The public RawNode.Step unknown-response peer check also belongs here.
+    // It remains deferred until the C progress tracker exists; rejecting all
+    // response messages in this inert skeleton would be incorrect.
+    return raft_raw_node_step_for_node(raw_node, message);
+}
+
+int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
+                                const raft_message_view_t *message) {
+    if (raw_node == NULL || !raft_message_view_valid(message)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    // This is the lower-level Node actor/core entry point. It intentionally
+    // does not call raft_raw_node_step or apply public RawNode.Step checks.
     return RAFT_ERR_NOT_IMPLEMENTED;
 }
 
@@ -857,6 +892,13 @@ int raft_raw_node_progress_snapshot(const raft_raw_node_t *raw_node,
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     return RAFT_ERR_NOT_IMPLEMENTED;
+}
+
+bool raft_raw_node_has_progress(const raft_raw_node_t *raw_node, uint64_t id) {
+    if (raw_node == NULL || !raft_is_valid_node_id(id)) {
+        return false;
+    }
+    return false;
 }
 
 void raft_progress_snapshot_array_free(raft_progress_snapshot_t *snapshots,

@@ -65,6 +65,29 @@ retain the existing unknown-peer response filtering.
 
 No consensus logic was moved into `node.go`.
 
+For the later C-backed boundary, this distinction maps to two one-way-layered
+entry points:
+
+```text
+public RawNode.Step
+  -> raft_raw_node_step
+       -> public validation
+       -> raft_raw_node_step_for_node
+            -> direct core Step
+
+node.run / RawNode.stepForNode
+  -> raft_raw_node_step_for_node
+       -> direct core Step
+```
+
+The C Node helper corresponds to the old package-internal `r.Step` calls and
+must not call back through the public C Step function. Otherwise locally
+generated messages that are valid in `node.run` could be rejected by the
+public RawNode boundary. The historical pure-Go Phase 1 implementation keeps
+unknown-peer filtering behind `stepForNode`; the C design must preserve the
+observable filtering while keeping public-only validation out of the Node
+actor helper.
+
 ## Ready/Advance semantics
 
 The Ready lifecycle is unchanged:

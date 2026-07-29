@@ -1,76 +1,443 @@
-Read RAFT_C_PORTING_SPEC.md, PORTING_BASELINE.md, PHASE1_RAWNODE_BOUNDARY_RESULT.md, and PHASE2_C_RAWNODE_SKELETON_RESULT.md.
+Read the current repository state and all C porting documents/results that already exist.
 
-Now implement Phase 3 only: add the Go RawNode binding skeleton for the C RawNode API.
+This is Phase 4: create the Go RawNode binding skeleton for the C-backed RawNode path.
+
+Assume previous cleanup tasks have already been requested/applied, including:
+
+* C type-separated payload API updates,
+* C/Go pointer-safe RawNode API updates,
+* WithProgress C progress snapshot design,
+* removal of `raft_raw_node_transfer_leadership`,
+* canonical leadership transfer API is now only `raft_raw_node_transfer_leader`,
+* Logger compatibility is handled by the Go RawNode wrapper, not by a C logger accessor,
+* `Advance` C API takes only `raft_raw_node_t *rn`, not a Ready argument.
+
+Before editing code, inspect the current files and docs. In particular, read any of the following files if they exist:
+
+```text
+RAFT_C_PORTING_SPEC.md
+PORTING_BASELINE.md
+PHASE1_RAWNODE_BOUNDARY_PLAN.md
+PHASE1_RAWNODE_BOUNDARY_RESULT.md
+C_PORT_FOLLOWUP_DOCS_RESULT.md
+SENTINEL_NODE_IDS_FOR_C_PORT.md
+RAWNODE_API_PARITY_FOR_C_PORT.md
+CONFIG_FIELDS_FOR_C_PORT.md
+RAFTPB_WIRE_COMPAT_FOR_C_PORT.md
+READY_OWNERSHIP_FOR_C_PORT.md
+ERROR_MAPPING_FOR_C_PORT.md
+C_PORT_TRACKING_GAPS.md
+PHASE2_C_RAWNODE_SKELETON_RESULT.md
+C_TYPE_SEPARATED_PAYLOAD_API_RESULT.md
+C_GO_POINTER_SAFE_RAWNODE_API_RESULT.md
+WITH_PROGRESS_C_PORT_AUDIT_RESULT.md
+TRANSFER_LEADERSHIP_API_CLEANUP_RESULT.md
+```
+
+If some of these files do not exist, do not fail. Record which were missing in the result document.
+
+Target version/semantics:
+
+* Use etcd-io/raft v3.7.0 semantics as the reference.
+* `RawNode` methods are defined primarily in `rawnode.go`, with `Bootstrap` in `bootstrap.go`.
+* The default pure-Go build must remain unchanged and must continue to compile/test normally.
+* The new C-backed path must be behind the repository’s intended build tag, for example `cgo_raft`, `crawnode`, or whatever the existing docs/code already chose. Do not invent a second competing tag if one already exists.
 
 Goal:
-Create a Go `RawNode` binding layer that can wrap `*C.raft_raw_node_t`, but do not switch the default Go raft implementation to C yet unless the build tag explicitly enables it.
 
-Requirements:
+Create a Go binding skeleton where the C-backed `RawNode` is a thin wrapper over `*C.raft_raw_node_t`.
 
-1. Preserve the existing pure-Go implementation as the default.
-2. Add a build-tagged C-backed RawNode binding, for example behind a tag such as `crawnode` or `cgo_raft`.
-3. The Go C-backed `RawNode` should conceptually have this shape:
+Conceptual target:
 
 ```go
 type RawNode struct {
     p *C.raft_raw_node_t
 
+    id     uint64
+    logger Logger
+
     storageHandle cgo.Handle
-    loggerHandle  cgo.Handle // optional
-    traceHandle   cgo.Handle // optional
+    loggerHandle  cgo.Handle // only if the C logger bridge is actually used
 }
 ```
 
-4. Do not store raw Go pointers in C memory.
-5. Use `runtime/cgo.Handle` for Go objects referenced by C callbacks.
-6. Implement Go wrapper methods corresponding to the C API skeleton:
+Do not implement consensus logic in Go. The Go C-backed methods should only:
 
-   * `Tick`
-   * `Campaign`
-   * `Propose`
-   * `ProposeConfChange`
-   * `Step`
-   * `HasReady`
-   * `Ready`
-   * `Advance`
-   * `ApplyConfChange`
-   * `ReadIndex`
-   * `ReportUnreachable`
-   * `ReportSnapshot`
-   * `Status`
-   * any Node-needed getters introduced in Phase 1.
-7. The methods may call C skeleton functions that return “not implemented” for now, but the Go/C call path must compile.
-8. Add conversion skeletons for:
+* convert Go inputs to C ABI-safe inputs,
+* call the corresponding C function,
+* convert C outputs back to Go values,
+* free C-owned outputs,
+* map C error codes to Go errors or panics according to existing Go API behavior,
+* manage cgo.Handle lifetimes.
 
-   * Go `raftpb.Message` <-> C `raft_message_t`
-   * Go `raftpb.Entry` <-> C `raft_entry_t`
-   * Go `raftpb.Snapshot` <-> C `raft_snapshot_t`
-   * Go `Ready` <-> C `raft_ready_t`
-   * Go `SoftState`, `HardState`, `ConfState`, `Status` <-> C equivalents
-9. For now, conversion functions may be partial if the C backend is not used by default, but they must be structured so ownership is explicit.
-10. Add C free calls after converting C-owned structures into Go-owned structures.
-11. Add Go error conversion from C error enum to existing Go errors where possible.
-12. Add panic guards to exported Go callback skeletons.
-13. Add Storage callback bridge skeletons, but do not fully implement complex `Entries`/`Snapshot` copying unless this phase can do so safely.
-14. Do not change etcd-facing `Node` API.
-15. Do not alter normal pure-Go test behavior.
-16. Add build instructions for the new tag.
-17. Run:
+Do not break or rewrite the pure-Go `RawNode` implementation.
 
-    * default `go test ./...`
-    * build-tagged compile check if possible, e.g. `go test -tags crawnode ./...`
-18. Produce PHASE3_GO_RAWNODE_BINDING_RESULT.md summarizing:
+Required RawNode binding coverage:
 
-    * files added/changed,
-    * build tags used,
-    * Go RawNode methods mapped to C functions,
-    * implemented vs stubbed conversions,
-    * storage callback bridge status,
-    * memory ownership decisions,
-    * test/build results,
-    * next recommended phase.
-19. Git add and commit what you have done.
+Implement skeletons/wrappers for the v3.7.0 RawNode API surface, as far as the existing C API skeleton supports it:
 
-Important:
-This phase is about establishing the Go/C binding boundary. Do not port the full Raft algorithm yet. Do not make the C backend the default implementation yet.
+```go
+NewRawNode
+(*RawNode).Tick
+(*RawNode).TickQuiesced
+(*RawNode).Campaign
+(*RawNode).Propose
+(*RawNode).ProposeConfChange
+(*RawNode).ApplyConfChange
+(*RawNode).Step
+(*RawNode).Ready
+(*RawNode).HasReady
+(*RawNode).Advance
+(*RawNode).Status
+(*RawNode).BasicStatus
+(*RawNode).WithProgress
+(*RawNode).ReportUnreachable
+(*RawNode).ReportSnapshot
+(*RawNode).TransferLeader
+(*RawNode).ForgetLeader
+(*RawNode).ReadIndex
+(*RawNode).Bootstrap
+```
 
+Also implement any Phase 1 boundary helper methods that currently exist or are needed by `node.go`, such as:
+
+```go
+(*RawNode).ID
+(*RawNode).Logger
+(*RawNode).HasProgress
+```
+
+Only add these helper methods if they are already part of the Phase 1 boundary plan or currently needed by the code. They are boundary helpers, not consensus primitives.
+
+Important API decisions to enforce:
+
+1. Advance
+
+The C API must be used as:
+
+```c
+int raft_raw_node_advance(raft_raw_node_t *rn);
+```
+
+The C-backed Go method should preserve the Go signature for compatibility:
+
+```go
+func (rn *RawNode) Advance(_ Ready)
+```
+
+but it must ignore the `Ready` argument and call only:
+
+```go
+C.raft_raw_node_advance(rn.p)
+```
+
+Do not reconstruct a C `raft_ready_t` from the Go `Ready` just to call Advance.
+
+2. Leadership transfer
+
+Only use the canonical RawNode-level C API:
+
+```c
+int raft_raw_node_transfer_leader(raft_raw_node_t *rn, uint64_t transferee);
+```
+
+Do not use, recreate, or document this removed API:
+
+```c
+raft_raw_node_transfer_leadership(rn, lead, transferee)
+```
+
+Mapping:
+
+```text
+Go RawNode.TransferLeader(transferee)
+  -> C raft_raw_node_transfer_leader(rn, transferee)
+
+Go Node.TransferLeadership(ctx, lead, transferee)
+  -> Go Node channel/routing layer
+  -> MsgTransferLeader{From: transferee, To: lead}
+  -> RawNode.Step / raft_raw_node_step
+```
+
+3. WithProgress
+
+Do not implement `WithProgress` with a C-to-Go visitor callback.
+
+Use the C progress snapshot API:
+
+```c
+int raft_raw_node_progress_snapshot(
+    const raft_raw_node_t *rn,
+    raft_progress_snapshot_t **out,
+    size_t *out_len
+);
+
+void raft_progress_snapshot_array_free(
+    raft_progress_snapshot_t *arr,
+    size_t len
+);
+```
+
+The Go C-backed implementation must:
+
+* call the C snapshot API once,
+* convert each row to Go `tracker.Progress`,
+* map peer/learner type to Go `ProgressType`,
+* set `pr.Inflights = nil`,
+* invoke the visitor in Go,
+* free the C array.
+
+4. Logger
+
+Do not add a C function to return a Go logger.
+
+The C-backed Go `RawNode` wrapper should retain the Go `Logger` from `Config.Logger` and return it from the boundary helper:
+
+```go
+func (rn *RawNode) Logger() Logger {
+    return rn.logger
+}
+```
+
+If the C core has optional diagnostic logging, it may use `raft_logger_ops_t`, but that is separate from the Go `RawNode.Logger()` boundary helper.
+
+Do not call Go `Panicf` or `Fatalf` directly from C. C fatal conditions should become C error codes, with Go wrapper policy applied in Go.
+
+5. ID
+
+The C-backed Go `RawNode` should retain `Config.ID` as `rn.id` and/or expose it through a C getter if the existing C API has one.
+
+Preferred Go helper:
+
+```go
+func (rn *RawNode) ID() uint64 {
+    return rn.id
+}
+```
+
+6. HasProgress
+
+If `node.go` needs to replace direct `rn.raft.trk.Progress[id]` access, provide:
+
+```go
+func (rn *RawNode) HasProgress(id uint64) bool
+```
+
+backed by a C API such as:
+
+```c
+bool raft_raw_node_has_progress(const raft_raw_node_t *rn, uint64_t id);
+```
+
+If no such C function exists yet, add a C skeleton or document the gap clearly. Do not expose live progress pointers.
+
+7. Bootstrap
+
+`RawNode.Bootstrap(peers []Peer)` exists in Go v3.7.0 in `bootstrap.go`.
+
+The C-backed binding must call:
+
+```c
+int raft_raw_node_bootstrap(
+    raft_raw_node_t *rn,
+    const raft_peer_t *peers,
+    size_t peer_count
+);
+```
+
+or the equivalent existing C API.
+
+Go binding must not pass Go-allocated pointer-containing descriptor structs into C. `Peer.Context` is a byte payload and must be passed safely using C-owned temporary descriptors/arrays or a C-side from-parts/batch shim.
+
+8. Storage callback bridge
+
+`Config.Storage` is a Go `Storage` interface instance supplied by the app.
+
+The C-backed `NewRawNode` must create a `cgo.Handle` for a Go storage bridge object and pass only the handle value plus C-callable bridge functions to C.
+
+Rules:
+
+* Do not store raw Go pointers in C.
+* Store only `uintptr_t`/`cgo.Handle` values in C.
+* Exported Go storage bridge functions must recover from panic and return C error codes.
+* `Entries` and `Snapshot` results must be deep-copied into C-owned memory before C retains them.
+* Scalar callbacks such as `Term`, `FirstIndex`, `LastIndex` should map errors precisely.
+* Delete the cgo.Handle only after the C RawNode has been destroyed and can no longer callback.
+
+9. Cgo pointer safety
+
+Do not pass Go-allocated C structs containing Go pointers into C.
+
+Forbidden pattern:
+
+```go
+v := C.raft_byte_view_t{
+    data: (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(b))),
+    len:  C.size_t(len(b)),
+    is_nil: C.bool(b == nil),
+}
+C.raft_raw_node_propose(rn.p, &v)
+```
+
+Required approach:
+
+* For flat byte APIs, call C from-parts shims such as:
+
+```c
+raft_raw_node_propose_from_parts(...)
+raft_raw_node_read_index_from_parts(...)
+```
+
+* For aggregate APIs such as `Step`, `Bootstrap`, `ProposeConfChange`, and `ApplyConfChange`, use C-owned temporary descriptors/arrays or a single-shot/batch C builder/shim.
+* Avoid field-by-field cgo calls. Target one Go-to-C call per operation where feasible.
+
+10. Byte payload semantics
+
+Preserve nil-vs-empty byte slices.
+
+Mapping:
+
+```text
+Go nil []byte:
+  data = NULL
+  len = 0
+  is_nil = true
+
+Go empty but non-nil []byte{}:
+  data = NULL
+  len = 0
+  is_nil = false
+
+Go non-empty []byte:
+  data != NULL
+  len > 0
+  is_nil = false
+```
+
+Do not introduce ownership flags or runtime kind tags. Follow the type-separated payload model:
+
+* `raft_byte_view_t` for borrowed input,
+* `raft_bytes_t` for C-owned/internal/output data,
+* `*_view_t` aggregate types for borrowed inputs,
+* non-view aggregate types for owned outputs.
+
+11. Ready ownership
+
+`Ready()` should call the C ready API once and convert the returned C-owned `raft_ready_t` to the existing Go `Ready` shape.
+
+After conversion, free the C-owned ready with the matching C free function.
+
+Do not make `Advance` depend on passing that Go `Ready` back to C.
+
+If the C ready API is still skeleton-only, implement the binding skeleton and document exactly what is deferred.
+
+12. MustSync
+
+`Ready.MustSync` should come from the C `raft_ready_t.must_sync` field.
+
+The C helper equivalent of Go `MustSync(st, prevst, entsnum)` is:
+
+```c
+entry_count != 0 || st->term != prev->term || st->vote != prev->vote
+```
+
+Do not compare `commit` for MustSync.
+
+13. `applyUnstableEntries`
+
+Do not expose this as a public Go or C API.
+
+It is an internal RawNode policy equivalent to:
+
+```text
+apply_unstable_entries = !async_storage_writes
+```
+
+It belongs inside C `HasReady`, `Ready`, `readyWithoutAccept`, and `acceptReady` bookkeeping, not in the Go binding.
+
+14. Error mapping
+
+Use the repository’s documented C error enum and Go error mapping.
+
+Preserve Go API behavior:
+
+* Methods that return `error` should return decoded Go errors.
+* Methods that are void in Go but can fail in C need a clear policy consistent with the existing codebase, usually panic for impossible/internal errors or documented no-op for Go-compatible dropped messages.
+* Keep `ErrProposalDropped`, storage errors, local message step errors, and peer-not-found/ignored errors distinct if the docs already require that.
+
+Implementation constraints:
+
+* Keep the default pure-Go build unaffected.
+* Do not implement C consensus logic in this phase.
+* Do not rewrite `node.go` beyond what is required to compile with the already-planned RawNode boundary helpers.
+* Do not change public Go API signatures.
+* Do not add per-peer C-to-Go callbacks for WithProgress.
+* Do not reintroduce `raft_raw_node_transfer_leadership`.
+* Do not add a C logger accessor for `RawNode.Logger()`.
+* Do not pass Go pointer-containing descriptors to C.
+* Prefer compile-safe skeletons with explicit TODO/deferred notes over unsafe partial implementations.
+
+Expected files to create/update may include, depending on the repository layout:
+
+* C-backed RawNode Go files under build tag, e.g. `rawnode_cgo.go`, `bootstrap_cgo.go`, `storage_bridge_cgo.go`, `convert_cgo.go`, `errors_cgo.go`.
+* Build-tagged pure-Go files if needed to separate struct definitions.
+* C shim/header files only if needed for safe from-parts/batch binding.
+* Documentation/result files.
+
+Testing/build validation:
+
+1. Run formatting on changed Go files:
+
+```bash
+gofmt -w <changed-go-files>
+```
+
+2. Run the default pure-Go test suite:
+
+```bash
+go test ./...
+```
+
+If `/tmp` space is a problem, use repo-local temp/cache directories:
+
+```bash
+mkdir -p .tmp .gocache
+TMPDIR=$PWD/.tmp GOTMPDIR=$PWD/.tmp GOCACHE=$PWD/.gocache go test ./...
+```
+
+3. Run a C-backed build/test command if the repository already defines a build tag for it. For example:
+
+```bash
+go test -tags=cgo_raft ./...
+```
+
+or whatever tag the repository documents.
+
+If the C-backed path cannot fully run because the C core is still skeleton-only, at least ensure it compiles as far as the current skeleton allows, and document the exact blocker.
+
+Deliverable:
+
+Create or update:
+
+```text
+PHASE4_GO_RAWNODE_BINDING_SKELETON_RESULT.md
+```
+
+Include:
+
+* files inspected,
+* existing docs/results used,
+* build tag chosen,
+* files changed,
+* RawNode methods covered,
+* methods still deferred and why,
+* cgo pointer-safety decisions,
+* storage bridge lifecycle design,
+* Ready/Advance ownership design,
+* WithProgress progress snapshot design,
+* leadership transfer cleanup confirmation,
+* Logger handling confirmation,
+* tests/build commands run and results,
+* remaining gaps for the next phase.
+
+Do not broaden this task beyond the Go RawNode binding skeleton unless required to fix directly related compile errors.

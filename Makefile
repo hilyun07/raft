@@ -31,6 +31,10 @@ test:
 test-c:
 	$(MAKE) -C c test
 
+.PHONY: test-cgo-raft
+test-cgo-raft:
+	CGO_ENABLED=1 go test -tags=cgo_raft ./...
+
 .PHONY: clean-c
 clean-c:
 	$(MAKE) -C c clean

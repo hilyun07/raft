@@ -89,7 +89,8 @@ audit in `C_GO_POINTER_SAFE_RAWNODE_API_RESULT.md`.
   Go `Node.TransferLeadership(ctx, lead, transferee)` stays in the Go
   actor/channel layer and routes
   `MsgTransferLeader{From: transferee, To: lead}` through
-  `raft_raw_node_step`.
+  `raft_raw_node_step_for_node`. Public RawNode callers use
+  `raft_raw_node_step`, which validates before delegating to that helper.
 - How will Ready preview identity be represented so output can be freed before
   later acceptance/Advance calls?
 - Will C message structs gain explicit scalar/byte presence bits, or will

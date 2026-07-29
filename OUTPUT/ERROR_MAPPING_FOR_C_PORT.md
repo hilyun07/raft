@@ -156,3 +156,18 @@ change” does not by itself determine whether an API should return OK.
 - config-change zero no-op and strict public validation;
 - unknown transfer target differential behavior;
 - no unimplemented stub returning a storage-domain error.
+
+For Step errors, the call layering is:
+
+```text
+raft_raw_node_step
+  -> public local-message and unknown-peer-response validation
+  -> raft_raw_node_step_for_node
+       -> direct core Step
+```
+
+`RAFT_ERR_STEP_LOCAL_MSG` and
+`RAFT_ERR_STEP_PEER_NOT_FOUND_OR_IGNORED` belong to the public boundary.
+`raft_raw_node_step_for_node` is the Go Node actor helper and must not call the
+public function. The Node actor performs its own routing/filtering and invokes
+the lower-level helper so legitimate local/internal messages are not rejected.

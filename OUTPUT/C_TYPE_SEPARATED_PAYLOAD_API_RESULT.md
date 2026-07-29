@@ -84,10 +84,19 @@ int raft_raw_node_read_index(raft_raw_node_t *rn,
 int raft_raw_node_step(raft_raw_node_t *rn,
                        const raft_message_view_t *message);
 
+int raft_raw_node_step_for_node(raft_raw_node_t *rn,
+                                const raft_message_view_t *message);
+
 int raft_raw_node_bootstrap(raft_raw_node_t *rn,
                             const raft_peer_view_t *peers,
                             size_t peer_count);
 ```
+
+The public Step entry point validates the public RawNode boundary and then
+delegates to `raft_raw_node_step_for_node`. The latter is the lower-level Go
+Node actor/core entry point and must not call the public function. Both accept
+borrowed message views, but their validation layers are intentionally
+different.
 
 Configuration-change APIs accept
 `const raft_conf_change_v2_view_t *`. Public structs remain pointer-passed;
@@ -96,8 +105,9 @@ a null input descriptor is invalid unless an API explicitly says otherwise.
 The type-graph correction advanced the marker from version 4 to 5; the
 subsequent C-owned Ready/argument-free Advance safety correction advanced it
 to 6, the explicit progress-snapshot API rename advanced it to 7, and removal
-of the redundant two-ID leadership-transfer declaration leaves the current
-marker at version 8.
+of the redundant two-ID leadership-transfer declaration advanced it to 8.
+The later Phase 4 Node-boundary helper additions leave the current marker at
+version 9.
 
 ## Validation
 

@@ -38,7 +38,7 @@ be reused to mean unimplemented.
 | `Propose([]byte)` | Yes, with borrowed `const raft_byte_view_t *` plus scalar cgo shim | Yes | Phase 6; limits completed in Phase 7 | A null descriptor is invalid, not nil. Preserve `is_nil` versus canonical present-empty; input retained beyond the call must be copied into owned `raft_bytes_t`. The Go binding must not allocate the descriptor in Go memory. Success means accepted for processing, not committed, and may still return proposal-dropped. |
 | `ProposeConfChange(ConfChangeI)` | Yes | Yes | Phase 7 | One temporary C ConfChangeV2 descriptor/change array and one RawNode call. Preserve legacy versus V2 encoding, joint transitions, opaque `is_nil` context, and proposal-time validation. |
 | `ApplyConfChange(ConfChangeI)` | Yes | Yes | Phase 7 | Same single-shot temporary C input rule; output ConfState is C-owned and batch-copied to Go. Preserve zero-NodeID cancellation and call only when applying a committed change. |
-| `Step(*Message)` | Yes, with `const raft_message_view_t *` | Yes | Phase 6, extended through Phases 7-11 | Go builds the complete temporary C descriptor graph, makes one Step call, and frees it; never use Go-allocated pointer-bearing descriptors or per-field cgo setters. Reject unexpected local messages and preserve unknown-response/local-target behavior. Retained input is recursively copied to owned `raft_message_t`. |
+| `Step(*Message)` | Yes, with `const raft_message_view_t *` | Yes | Phase 6, extended through Phases 7-11 | Go builds the complete temporary C descriptor graph, makes one call to public `raft_raw_node_step`, and frees it. That function performs public RawNode validation and delegates to `raft_raw_node_step_for_node`; never reverse this direction. Reject unexpected local messages and responses from unknown non-local peers. Retained input is recursively copied to owned `raft_message_t`. |
 | `Ready()` | Yes | Yes | Phase 6, completed in Phase 11 | Combined preview/accept operation. Must preserve previous-state comparisons, message draining, unstable acceptance, read-state draining, `MustSync`, and deferred completion steps. |
 | `readyWithoutAccept()` | Yes for the Go Node binding, public or private C ABI | Yes | Phase 6, completed in Phase 11 | Read-only preview. It must not consume work when the Node actor loses the Ready-channel select. |
 | `acceptReady(Ready)` | Yes for the Go Node binding, public or private C ABI | Yes | Phase 6, completed in Phase 11 | Acceptance occurs only after Ready delivery. It records prior states, drains output, accepts unstable work, and prepares advance responses. No intervening mutation is allowed after preview. |
@@ -62,10 +62,39 @@ part of the historical RawNode API:
 | Getter | C/binding treatment |
 | --- | --- |
 | `ID()` | Cache `Config.ID` in the Go binding/Node or expose a scalar C getter. It is immutable. |
-| `HasProgress(id)` | Expose a scalar C query once Phase 7 owns progress. Node uses it around self-removal; synthesizing it by enumerating all progress is unnecessary. |
+| `HasProgress(id)` | Phase 4 adds scalar `raft_raw_node_has_progress`; the skeleton returns false until Phase 7 owns progress. Node uses it around self-removal; no live pointer or full enumeration is exposed. |
 | `AsyncStorageWritesEnabled()` | Cache the validated config value in Go or expose a scalar getter. |
 | `Logger()` | Keep Go-side metadata unless a logger callback bridge is explicitly added. Do not expose a Go logger pointer from C. |
-| `stepForNode()` | Package-private Go binding operation or C internal step mode. It accepts legitimate Node-generated local messages while retaining unknown-response filtering. Do not weaken public `RawNode.Step`. |
+| `stepForNode()` | Phase 4 maps this package-private Go binding operation directly to `raft_raw_node_step_for_node`. It corresponds to `node.run`'s historical package-internal `r.Step` calls and bypasses public RawNode Step validation. The Go Node actor retains its routing/filtering responsibilities. It must never be implemented by calling `raft_raw_node_step`. |
+
+## Step entry-point layering
+
+`raft_raw_node_step` and `raft_raw_node_step_for_node` are not interchangeable:
+
+```text
+Go RawNode.Step / external C caller
+  -> raft_raw_node_step
+       -> reject local messages at the public boundary
+       -> reject response messages from unknown non-local peers
+       -> raft_raw_node_step_for_node
+            -> directly step the C raft core
+
+Go node.run
+  -> RawNode.stepForNode
+  -> raft_raw_node_step_for_node
+       -> directly step the C raft core
+```
+
+The correct dependency direction is public-to-internal. The Node helper must
+not delegate back to the public function, because valid Node-generated local
+messages would then be rejected. External C users call
+`raft_raw_node_step`; only the Go Node boundary uses
+`raft_raw_node_step_for_node`.
+
+The inert skeleton can perform the local-message check now. The
+unknown-response peer check needs the later C progress tracker and remains a
+documented implementation gate rather than being approximated by rejecting
+all response messages.
 
 ## Status and progress are three distinct APIs
 
@@ -125,7 +154,7 @@ so its mapping is:
 Go Node.TransferLeadership(ctx, lead, transferee)
   -> Go Node channel/routing layer
   -> MsgTransferLeader{From: transferee, To: lead}
-  -> RawNode.Step / raft_raw_node_step
+  -> RawNode.stepForNode / raft_raw_node_step_for_node
 ```
 
 It does not require a dedicated two-ID C RawNode function. In particular,

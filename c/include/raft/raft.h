@@ -564,8 +564,19 @@ int raft_raw_node_apply_conf_change(
     raft_raw_node_t *raw_node,
     const raft_conf_change_v2_view_t *conf_change,
     raft_conf_state_t *conf_state);
+// Public RawNode.Step boundary for external C callers. It applies public Step
+// validation, including local-message rejection and (once the C tracker
+// exists) unknown-peer response rejection, then delegates to
+// raft_raw_node_step_for_node.
 int raft_raw_node_step(raft_raw_node_t *raw_node,
                        const raft_message_view_t *message);
+// Lower-level Go Node actor/core boundary corresponding to node.run's
+// package-internal r.Step calls. It intentionally bypasses public
+// RawNode.Step validation and must never delegate back to raft_raw_node_step.
+// The C-backed node.run path uses this function for messages already routed
+// and filtered by the Go Node layer.
+int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
+                                const raft_message_view_t *message);
 
 // The skeleton has no pending work and returns false. Later Ready phases must
 // implement every Ready source before enabling the C backend.
@@ -617,6 +628,10 @@ int raft_raw_node_status(const raft_raw_node_t *raw_node,
 int raft_raw_node_progress_snapshot(const raft_raw_node_t *raw_node,
                                     raft_progress_snapshot_t **out,
                                     size_t *out_len);
+// Scalar boundary query used by the Go Node actor after membership changes.
+// It never exposes a live Progress pointer. The skeleton has no tracker and
+// returns false.
+bool raft_raw_node_has_progress(const raft_raw_node_t *raw_node, uint64_t id);
 
 int raft_raw_node_report_unreachable(raft_raw_node_t *raw_node, uint64_t id);
 int raft_raw_node_report_snapshot(raft_raw_node_t *raw_node,
@@ -626,7 +641,7 @@ int raft_raw_node_report_snapshot(raft_raw_node_t *raw_node,
 // Canonical mapping for Go RawNode.TransferLeader. Go
 // Node.TransferLeadership remains a Go actor/channel-layer routing operation:
 // it constructs MsgTransferLeader{From: transferee, To: lead} and submits that
-// message to the C-backed core through raft_raw_node_step.
+// message to the C-backed core through raft_raw_node_step_for_node.
 int raft_raw_node_transfer_leader(raft_raw_node_t *raw_node,
                                   uint64_t transferee);
 int raft_raw_node_forget_leader(raft_raw_node_t *raw_node);

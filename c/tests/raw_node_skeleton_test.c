@@ -226,7 +226,12 @@ static void test_lifecycle_and_stubs(void) {
            RAFT_ERR_NOT_IMPLEMENTED);
     assert(raft_raw_node_propose_conf_change(raw_node, &conf_change) ==
            RAFT_ERR_NOT_IMPLEMENTED);
+    // Public RawNode.Step rejects a locally generated message whose sender is
+    // not a local target. The Node actor helper intentionally bypasses that
+    // public validation and reaches the inert core stub.
     assert(raft_raw_node_step(raw_node, &message) ==
+           RAFT_ERR_STEP_LOCAL_MSG);
+    assert(raft_raw_node_step_for_node(raw_node, &message) ==
            RAFT_ERR_NOT_IMPLEMENTED);
     assert(raft_raw_node_ready(raw_node, &ready) ==
            RAFT_ERR_NOT_IMPLEMENTED);
@@ -251,13 +256,14 @@ static void test_lifecycle_and_stubs(void) {
            RAFT_ERR_NOT_IMPLEMENTED);
     assert(snapshots == NULL);
     assert(snapshot_len == 0);
+    assert(!raft_raw_node_has_progress(raw_node, 1));
     assert(raft_raw_node_forget_leader(raw_node) ==
            RAFT_ERR_NOT_IMPLEMENTED);
     assert(raft_raw_node_transfer_leader(raw_node, 2) ==
            RAFT_ERR_NOT_IMPLEMENTED);
-    // Go Node.TransferLeadership routes this message through Step; it does
-    // not require a separate two-ID C RawNode function.
-    assert(raft_raw_node_step(raw_node, &transfer_message) ==
+    // Go Node.TransferLeadership routes this message through the Node actor
+    // helper; it does not require a separate two-ID C RawNode function.
+    assert(raft_raw_node_step_for_node(raw_node, &transfer_message) ==
            RAFT_ERR_NOT_IMPLEMENTED);
     assert(raft_raw_node_report_unreachable(raw_node, 2) ==
            RAFT_ERR_NOT_IMPLEMENTED);
@@ -328,6 +334,11 @@ static void test_invalid_arguments(void) {
     assert(raft_raw_node_read_index(
                (raft_raw_node_t *)(uintptr_t)1, NULL) ==
            RAFT_ERR_INVALID_ARGUMENT);
+    assert(raft_raw_node_step_for_node(NULL,
+                                      &(raft_message_view_t){
+                                          .context = {NULL, 0, true},
+                                      }) ==
+           RAFT_ERR_INVALID_ARGUMENT);
     assert(raft_raw_node_ready(NULL, &ready) == RAFT_ERR_INVALID_ARGUMENT);
     assert(ready == NULL);
     assert(raft_raw_node_ready((raft_raw_node_t *)(uintptr_t)1, NULL) ==
@@ -347,6 +358,9 @@ static void test_invalid_arguments(void) {
     assert(raft_raw_node_progress_snapshot(
                (raft_raw_node_t *)(uintptr_t)1, &snapshots, NULL) ==
            RAFT_ERR_INVALID_ARGUMENT);
+    assert(!raft_raw_node_has_progress(NULL, 1));
+    assert(!raft_raw_node_has_progress(
+        (raft_raw_node_t *)(uintptr_t)1, RAFT_NONE));
     assert(raft_raw_node_forget_leader(NULL) == RAFT_ERR_INVALID_ARGUMENT);
     assert(raft_raw_node_transfer_leader(NULL, 2) ==
            RAFT_ERR_INVALID_ARGUMENT);
@@ -393,7 +407,7 @@ static void test_node_id_boundary_validation(void) {
     message.from = RAFT_NONE;
     message.to = RAFT_NONE;
     assert(raft_raw_node_step(raw_node, &message) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_STEP_LOCAL_MSG);
     message.from = RAFT_LOCAL_APPEND_THREAD;
     message.to = RAFT_LOCAL_APPLY_THREAD;
     assert(raft_raw_node_step(raw_node, &message) ==

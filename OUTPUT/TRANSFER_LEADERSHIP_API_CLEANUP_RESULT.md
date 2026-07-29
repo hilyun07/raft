@@ -26,7 +26,7 @@ actor/channel-layer routing operation:
 Go Node.TransferLeadership(ctx, lead, transferee)
   -> Go Node channel/routing layer
   -> MsgTransferLeader{From: transferee, To: lead}
-  -> RawNode.Step / raft_raw_node_step
+  -> RawNode.stepForNode / raft_raw_node_step_for_node
 ```
 
 The Go Node layer remains in Go for the C-backed integration, so its routing
@@ -91,7 +91,7 @@ so no obsolete implementation body had to be deleted.
 - Kept `raft_raw_node_transfer_leader(rn, transferee)` as the sole canonical
   C RawNode helper.
 - Replaced the header comment with the explicit Node routing path through
-  `raft_raw_node_step`.
+  `raft_raw_node_step_for_node`.
 - Removed all C test calls to the two-ID helper.
 - Kept normal, null-handle, and reserved-transferee tests for
   `raft_raw_node_transfer_leader`.
@@ -103,11 +103,14 @@ so no obsolete implementation body had to be deleted.
       .from = transferee,
       .to = lead,
   };
-  raft_raw_node_step(raw_node, &message);
+  raft_raw_node_step_for_node(raw_node, &message);
   ```
 
 - Advanced the private skeleton ABI marker from 7 to 8 because the public
   declaration was removed.
+
+The subsequent Phase 4 Node-boundary helper additions advance the current
+private skeleton marker to 9.
 
 ### Documentation and future phase instructions
 
@@ -119,7 +122,8 @@ so no obsolete implementation body had to be deleted.
   ```
 
 - Documented Go `Node.TransferLeadership` as a Go channel/routing operation
-  whose `MsgTransferLeader` enters the C-backed core through Step.
+  whose `MsgTransferLeader` enters the C-backed core through the lower-level
+  Node actor Step helper, bypassing public RawNode Step validation.
 - Removed the “two transfer forms” explanation.
 - Updated the Phase 2 result, follow-up result, cgo-safety audit, and current
   ABI-marker notes.

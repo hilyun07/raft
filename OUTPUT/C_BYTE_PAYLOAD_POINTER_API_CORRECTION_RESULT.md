@@ -35,7 +35,8 @@ This pointer correction originally advanced the private marker to version 4;
 the subsequent type-separated aggregate and Ready/Advance safety corrections
 advanced it to version 6, the explicit progress-snapshot API rename advanced
 it to 7, and removal of the redundant two-ID leadership-transfer declaration
-leaves the current marker at version 8.
+advanced it to 8. The later Phase 4 boundary-helper additions leave the
+current marker at version 9.
 
 ## Null and nil semantics
 

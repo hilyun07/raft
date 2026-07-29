@@ -13,7 +13,7 @@ added or changed.
 | --- | --- |
 | `c/include/raft/raft.h` | Added type-separated view/owned wrappers and aggregate types, changed payload fields and RawNode signatures, and documented canonical shapes and ownership. |
 | `c/src/raw_node.c` | Implemented shared validation, recursive view-to-owned copying, unconditional owned freeing, and wrapper-based stub validation. |
-| `c/src/raft_internal.h` | Successive wrapper, pointer, type-separation, Ready/Advance, progress-snapshot naming, and leadership-transfer cleanup corrections leave the current private skeleton marker at version 8. |
+| `c/src/raft_internal.h` | Successive wrapper, pointer, type-separation, Ready/Advance, progress-snapshot naming, leadership-transfer cleanup, and Phase 4 boundary-helper corrections leave the current private skeleton marker at version 9. |
 | `c/tests/raw_node_skeleton_test.c` | Converted calls/initializers and added canonical-shape, invalid-shape, and free/reset tests. |
 | `prompts/RAFT_C_PORTING_SPEC.md` | Updated the port specification examples and ownership rules to use the wrappers. |
 | `OUTPUT/RAFTPB_WIRE_COMPAT_FOR_C_PORT.md` | Defined nil/empty/non-empty conversion rules and wrapper use at the raftpb boundary. |

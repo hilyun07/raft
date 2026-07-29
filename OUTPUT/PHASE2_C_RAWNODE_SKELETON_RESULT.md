@@ -13,7 +13,7 @@ cgo or compile the C subtree.
 | File | Change |
 | --- | --- |
 | `c/include/raft/raft.h` | Expanded the public ABI with opaque RawNode ownership, sentinels, helpers, error taxonomy, raftpb-compatible enums/types, borrowed/owned byte wrappers, callback shapes, complete RawNode declarations, and ownership/free APIs. |
-| `c/src/raft_internal.h` | Retained the private RawNode layout; removing the redundant two-ID leadership-transfer declaration leaves the skeleton ABI marker at version 8. |
+| `c/src/raft_internal.h` | Retained the private RawNode layout; the later Phase 4 Node-boundary helper additions leave the skeleton ABI marker at version 9. |
 | `c/src/raw_node.c` | Added external sentinel/payload validators, recursive view-to-owned deep-copy helpers, owned frees, shallow API/config validation, lifecycle allocation, inert status, and `RAFT_ERR_NOT_IMPLEMENTED` stubs. |
 | `c/tests/raw_node_skeleton_test.c` | Expanded public-header-only tests for enum values, sentinels, lifecycle, every stub family, view/owned nil-empty validation, recursive copies, reserved IDs, and owned frees. |
 | `OUTPUT/PHASE2_C_RAWNODE_SKELETON_RESULT.md` | Replaced the earlier partial result with this full tracked-surface result. |
@@ -33,6 +33,31 @@ typedef struct raft_raw_node raft_raw_node_t;
 The private header currently stores only an ABI marker, normalized/copied
 configuration, and copied storage callback table. It contains no consensus
 state and no raw Go pointer.
+
+Phase 4 subsequently added two binding-only boundary helpers:
+
+- `raft_raw_node_step_for_node`, the internal Go actor Step mode;
+- `raft_raw_node_has_progress`, a scalar query that never exposes a live
+  tracker pointer.
+
+The public Step entry point applies the public local-message check and then
+delegates to the actor helper:
+
+```text
+raft_raw_node_step
+  -> public RawNode.Step validation
+  -> raft_raw_node_step_for_node
+       -> direct core Step
+```
+
+`raft_raw_node_step_for_node` corresponds to `node.run`'s package-internal
+`r.Step` path. It deliberately does not call `raft_raw_node_step` and does not
+apply public Step validation. External C users call
+`raft_raw_node_step`; the Go C-backed Node actor calls the helper directly.
+The tracker-dependent public check for response messages from unknown
+non-local peers remains deferred until the C progress tracker exists. After
+the available validation, Step reaches the compile-safe core stub and returns
+`RAFT_ERR_NOT_IMPLEMENTED`; HasProgress returns false until the tracker phase.
 
 `raft_raw_node_new` validates pointer/config/callback-table shape and allocates
 the inert handle. Allocation failure returns `RAFT_ERR_OUT_OF_MEMORY`.
@@ -156,11 +181,15 @@ int raft_raw_node_read_index(raft_raw_node_t *raw_node,
                              const raft_byte_view_t *request_context);
 int raft_raw_node_step(raft_raw_node_t *raw_node,
                        const raft_message_view_t *message);
+int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
+                                const raft_message_view_t *message);
 ```
 
 There are no legacy overloads with separate pointer, length, and nil
 parameters. There are also no struct-by-value public arguments: descriptor
 pointer nullness is validated independently and never represents a nil slice.
+The public Step function delegates to the lower-level Node helper after public
+validation; the helper never delegates in the opposite direction.
 
 `raft_ready_t` has explicit presence flags for SoftState, HardState, and
 Snapshot plus an opaque token reserved for a future preview/accept/advance
@@ -229,7 +258,7 @@ validation and otherwise returns `RAFT_ERR_NOT_IMPLEMENTED`.
 Go `Node.TransferLeadership(ctx, lead, transferee)` remains a Go
 actor/channel-layer routing API. The Go Node constructs
 `MsgTransferLeader{From: transferee, To: lead}` and submits it through
-`RawNode.Step` / `raft_raw_node_step`; there is no separate
+`RawNode.stepForNode` / `raft_raw_node_step_for_node`; there is no separate
 `raft_raw_node_transfer_leadership` C function.
 
 ForgetLeader likewise validates the handle and returns not implemented. No
