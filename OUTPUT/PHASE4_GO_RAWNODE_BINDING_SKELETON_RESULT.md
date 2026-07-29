@@ -75,7 +75,8 @@ C tests, and both Makefiles.
   The former preserves the public-Step versus Node-internal-Step distinction.
   The latter is scalar and never exposes a progress pointer. Both are honest
   skeletons.
-- `c/src/raft_internal.h` advances the private skeleton marker to version 9.
+- `c/src/raft_internal.h` used marker version 9 at completion of this phase;
+  the Phase 6 log integration advances the current marker to version 10.
 - `c/tests/raw_node_skeleton_test.c` covers both helpers.
 - The root Makefile adds:
 
@@ -196,10 +197,13 @@ then deletes the `cgo.Handle`. A finalizer is the fallback because public Go
 RawNode has no Close method. A later end-to-end Node integration can call the
 package-private deterministic destroy hook after its actor stops.
 
-The current C constructor copies but does not invoke Storage callbacks. Phase
-5 adds a private C call-through harness and focused tagged tests for all six
-callbacks, including deep copies, nil/empty preservation, error/panic mapping,
-and handle cleanup. Real C log/core consumption remains deferred.
+Phase 5 added a private C call-through harness and focused tagged tests for
+all six callbacks, including deep copies, nil/empty preservation, error/panic
+mapping, and handle cleanup. Phase 6 now makes the C constructor invoke
+`FirstIndex` and `LastIndex` to initialize its internal log. The log consumes
+batched `Entries`, scalar `Term`, and owned `Snapshot` callback results as
+needed and frees owned results. Full Raft initialization still defers
+`InitialState` and consensus-state construction.
 
 ## Ready and Advance ownership
 

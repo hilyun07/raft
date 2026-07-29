@@ -85,8 +85,12 @@ does not retain a pointer to the Go caller's temporary table. Focused Phase 5
 tests invoke all six callbacks through the C table without requiring the
 consensus core.
 
-The C constructor that begins real initialization must synchronously obtain
-HardState and ConfState. Arbitrary storage failures are fatal to that RawNode;
+Phase 6 makes `raft_raw_node_new` synchronously call `FirstIndex` and
+`LastIndex` to initialize its private `raft_log_t`. Later log reads use
+batched `Entries`, `Term`, and `Snapshot`; all returned aggregate data is
+C-owned and freed after copying/consumption. The later full Raft constructor
+must additionally obtain HardState and ConfState through `InitialState`.
+Arbitrary storage failures are fatal to that RawNode;
 compacted/unavailable errors retain operation-specific meanings.
 
 ## Logger and `with_tla`

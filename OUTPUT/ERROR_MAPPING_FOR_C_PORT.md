@@ -101,6 +101,25 @@ The C core must propagate callback failures to a public call or store a fatal
 node state that the next public call reports. It must not drop the error and
 continue participating in elections.
 
+### Phase 6 log-layer propagation
+
+The private C log preserves storage-domain distinctions:
+
+- a compacted term/range returns `RAFT_ERR_STORAGE_COMPACTED`;
+- a missing term/range returns `RAFT_ERR_STORAGE_UNAVAILABLE`;
+- Storage snapshot retry returns
+  `RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE`;
+- `zeroTermOnErrCompacted`-equivalent handling converts only compacted and
+  unavailable term lookups to term zero, while propagating other failures;
+- callback panic, OOM, and other callback results pass through unchanged.
+
+Go panic conditions such as committing beyond the last index, slicing beyond
+the log, or violating applied/applying bounds return `RAFT_ERR_FATAL` from
+the private C helper. Invalid public/helper pointers and malformed input
+descriptors return `RAFT_ERR_INVALID_ARGUMENT`. No log path reuses
+`RAFT_ERR_NOT_IMPLEMENTED` or collapses a storage error into a generic
+unavailable result.
+
 ### Cgo-safe Storage result ownership
 
 Exported Go Storage callbacks must not return Go-owned Entry/Snapshot memory

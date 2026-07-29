@@ -59,7 +59,7 @@ func (s *callbackTestStorage) Term(index uint64) (uint64, error) {
 
 func (s *callbackTestStorage) FirstIndex() (uint64, error) {
 	if s.firstIndex == nil {
-		return 0, nil
+		return 1, nil
 	}
 	return s.firstIndex()
 }
@@ -404,6 +404,46 @@ func TestCGoStorageHandleDeletedWhenCConstructionFails(t *testing.T) {
 	}
 	if observed == 0 {
 		t.Fatal("storage handle was not created before the C constructor")
+	}
+	assertStorageHandleDeleted(t, observed)
+}
+
+func TestCGoRawNodeInitializesLogFromStorage(t *testing.T) {
+	storage := NewMemoryStorage()
+	cfg := cgoSkeletonConfig()
+	cfg.Storage = storage
+	rn, err := NewRawNode(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rn.destroy()
+	if storage.callStats.firstIndex != 1 || storage.callStats.lastIndex != 1 {
+		t.Fatalf(
+			"log constructor calls = first:%d last:%d, want 1 each",
+			storage.callStats.firstIndex,
+			storage.callStats.lastIndex,
+		)
+	}
+	if storage.callStats.initialState != 0 {
+		t.Fatalf("log constructor called InitialState %d times", storage.callStats.initialState)
+	}
+}
+
+func TestCGoRawNodeLogInitializationErrorDeletesHandle(t *testing.T) {
+	cfg := cgoSkeletonConfig()
+	cfg.Storage = &callbackTestStorage{
+		firstIndex: func() (uint64, error) {
+			return 0, ErrUnavailable
+		},
+	}
+	var observed cgo.Handle
+	if _, err := newRawNode(cfg, func(handle cgo.Handle) {
+		observed = handle
+	}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("NewRawNode error = %v, want %v", err, ErrUnavailable)
+	}
+	if observed == 0 {
+		t.Fatal("storage handle was not created before log initialization")
 	}
 	assertStorageHandleDeleted(t, observed)
 }

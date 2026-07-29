@@ -204,6 +204,14 @@ entries use this field. Do not assume it is UTF-8. A nil configuration-change
 proposal intentionally marshals as `EntryConfChangeV2` with nil data, which
 decodes as an empty V2 change.
 
+Phase 6's C log size limiter counts the protobuf wire size represented by the
+current C Entry fields. The current C Entry skeleton does not preserve scalar
+protobuf presence bits, so it treats zero-valued scalar fields as absent.
+That matches ordinary generated proto3 encoding for the currently represented
+values, but exact wire-size parity must be retested if optional/presence-aware
+fields are added. This is a documented boundary gap, not permission to size
+only `Entry.Data`.
+
 ### `Message.Context`
 
 Context carries protocol-specific opaque data, including heartbeat read-index

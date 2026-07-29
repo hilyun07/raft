@@ -292,11 +292,12 @@ Passed.
 
 ## Remaining gaps and deferred work
 
-- The inert C RawNode constructor copies the callback table but does not yet
-  invoke InitialState as part of real Raft initialization.
-- No C log/core consumes callback-owned results yet. Later phases must free
-  every successful output after use and propagate callback failures into a
-  fatal RawNode state where Go semantics require it.
+- The C RawNode constructor still does not invoke `InitialState` as part of
+  full Raft initialization.
+- Phase 6 now initializes a private C log through `FirstIndex`/`LastIndex`.
+  That log consumes batched `Entries`, `Term`, and owned `Snapshot` callback
+  results and frees successful owned outputs. Consensus-state consumers and
+  end-to-end Ready behavior remain later work.
 - Allocation-failure cleanup is implemented, but deterministic OOM fault
   injection across every allocation site remains future sanitizer/fault-test
   work.

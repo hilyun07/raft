@@ -1,140 +1,441 @@
-Read RAFT_C_PORTING_SPEC.md and all previous phase result files.
+Read the current repository state and all C porting documents/results that already exist.
 
-Now implement Phase 5 only: port the log subsystem to C.
+This is Phase 6: port the C raft log subsystem: `raftLog`, `unstable`, and storage-backed log access.
+
+Assume previous phases have already been requested/applied, including:
+
+* Phase 1 Go Node/RawNode boundary cleanup,
+* Phase 2 C RawNode public API skeleton,
+* type-separated payload API,
+* C/Go pointer-safe RawNode API,
+* WithProgress C progress snapshot design,
+* removal of `raft_raw_node_transfer_leadership`,
+* `raft_raw_node_step` / `raft_raw_node_step_for_node` layering documentation,
+* Phase 4 Go RawNode binding skeleton,
+* Phase 5 Go-backed Storage callback bridge.
+
+Before editing code, inspect the current files and docs. In particular, read any of the following files if they exist:
+
+```text
+RAFT_C_PORTING_SPEC.md
+PORTING_BASELINE.md
+PHASE1_RAWNODE_BOUNDARY_PLAN.md
+PHASE1_RAWNODE_BOUNDARY_RESULT.md
+C_PORT_FOLLOWUP_DOCS_RESULT.md
+SENTINEL_NODE_IDS_FOR_C_PORT.md
+RAWNODE_API_PARITY_FOR_C_PORT.md
+CONFIG_FIELDS_FOR_C_PORT.md
+RAFTPB_WIRE_COMPAT_FOR_C_PORT.md
+READY_OWNERSHIP_FOR_C_PORT.md
+ERROR_MAPPING_FOR_C_PORT.md
+C_PORT_TRACKING_GAPS.md
+PHASE2_C_RAWNODE_SKELETON_RESULT.md
+C_TYPE_SEPARATED_PAYLOAD_API_RESULT.md
+C_GO_POINTER_SAFE_RAWNODE_API_RESULT.md
+WITH_PROGRESS_C_PORT_AUDIT_RESULT.md
+TRANSFER_LEADERSHIP_API_CLEANUP_RESULT.md
+STEP_FOR_NODE_LAYERING_DOC_UPDATE_RESULT.md
+PHASE4_GO_RAWNODE_BINDING_SKELETON_RESULT.md
+PHASE5_STORAGE_CALLBACK_BRIDGE_RESULT.md
+```
+
+If some files are missing, do not fail. Record which were missing in the result document.
+
+Reference version:
+
+* Use etcd-io/raft v3.7.0 semantics.
+* Inspect the Go implementation of:
+
+  * `log.go`
+  * unstable log implementation file, if separate
+  * `storage.go`
+  * `rawnode.go` Ready/Advance paths that depend on `raftLog`
+  * tests covering raftLog, unstable, storage errors, committed/applied/applying behavior.
 
 Goal:
-Implement the C equivalents of the Go raft log layer, including raftLog, unstable entries/snapshot handling, and storage-backed log access through the already-built C storage callback bridge.
 
-Do not port the full Raft state machine yet. This phase should focus on log correctness.
+Implement the C internal log subsystem corresponding to Go `raftLog`, `unstable`, and the Storage-backed log access layer.
 
-Scope:
+This phase should make the C core capable of:
 
-1. Port or implement C equivalents of:
+* initializing a log from `raft_storage_ops_t`,
+* reading terms and entries from unstable or Storage,
+* appending unstable entries,
+* tracking committed/applied/applying/stable progress,
+* producing unstable entries and committed entries for Ready,
+* accepting Ready bookkeeping,
+* handling snapshots at the log/unstable boundary,
+* preserving Go v3.7.0 error semantics for compacted/unavailable/snapshot-unavailable cases.
 
-   * raftLog
-   * unstable log buffer
-   * unstable snapshot tracking
-   * log term lookup
-   * log slicing
-   * first index / last index handling
-   * committed / applying / applied indexes
-   * stable-to / stable-snapshot-to behavior
-   * restore from snapshot
-   * append logic
-   * conflict detection
-   * maybeAppend semantics
-   * compaction-aware storage access
+Do not implement the full raft consensus state machine in this phase unless a small directly related helper is required for tests. Focus on the log subsystem.
 
-2. Use the C storage callback bridge from Phase 4.
-   The C log layer must call:
+Conceptual target:
 
-   * `Storage.FirstIndex`
-   * `Storage.LastIndex`
-   * `Storage.Term`
-   * `Storage.Entries`
-   * `Storage.Snapshot`
+```text
+C raftLog
+  -> unstable log/snapshot region
+  -> storage-backed stable log region through raft_storage_ops_t
+  -> committed / applying / applied indexes
+  -> helpers used later by raft core and RawNode Ready/Advance
+```
 
-3. Preserve Go semantics.
-   Inspect the current Go implementation before porting. Match behavior for:
+Suggested C internal files:
 
-   * `firstIndex`
-   * `lastIndex`
-   * `term`
-   * `entries`
-   * `slice`
-   * `maybeAppend`
-   * `findConflict`
-   * `findConflictByTerm`, if present
-   * `isUpToDate`
-   * `nextUnstableEnts`
-   * `nextCommittedEnts`
-   * `hasNextCommittedEnts`
-   * `appliedTo`
-   * `stableTo`
-   * `stableSnapTo`
-   * `restore`
+Use the repository’s existing layout if it already has names. Otherwise create or complete files like:
 
-4. Preserve error behavior.
-   Correctly handle:
+```text
+c/src/log.c
+c/src/log.h
+c/src/unstable.c
+c/src/unstable.h
+c/src/storage_bridge_internal.c  // only if needed
+c/tests/log_skeleton_test.c
+c/tests/unstable_skeleton_test.c
+```
 
-   * compacted entries
-   * unavailable entries
-   * temporarily unavailable snapshot
-   * out-of-bounds indexes
-   * fatal storage errors
-   * panic/fatal bridge errors
+Keep public headers minimal. Most of this phase should be private/internal C API, not public RawNode API.
 
-5. Preserve safety-critical invariants:
+Required internal types:
 
-   * never return log entries out of order;
-   * never apply entries below or equal to the applied index again;
-   * never advance committed beyond known last index;
-   * never treat unstable entries as persisted until stable/advance logic says so;
-   * preserve snapshot metadata index/term semantics;
-   * preserve compaction behavior;
-   * preserve conflict detection exactly.
+Implement or complete internal C equivalents of:
 
-6. Memory ownership:
+```text
+raft_log_t
+raft_unstable_t
+```
 
-   * C log-owned entries must be C-owned.
-   * Do not store pointers into Go-owned entries returned by the Storage bridge.
-   * If entries from Go Storage are needed after callback return, deep-copy them into C-owned memory.
-   * Add or reuse explicit free functions for entry vectors and snapshots.
-   * Avoid leaks on error paths.
+They should include, semantically:
 
-7. Testing:
-   Add focused C or Go build-tagged tests for the C log subsystem.
+```text
+raft_log_t:
+  storage ops / storage handle
+  unstable
+  committed
+  applying
+  applied
+  max_applying_entries_size or equivalent v3.7.0 field if present
 
-   Test at least:
+raft_unstable_t:
+  snapshot, if present
+  entries array
+  offset
+  offset_in_progress or equivalent v3.7.0 field if present
+```
 
-   * initialization from empty storage;
-   * initialization from non-empty storage;
-   * first index and last index;
-   * term lookup from storage;
-   * term lookup from unstable entries;
-   * term lookup across snapshot boundary;
-   * entries slicing from storage;
-   * entries slicing from unstable;
-   * entries slicing across storage and unstable;
-   * append entries;
-   * append entries with conflict;
-   * maybeAppend success;
-   * maybeAppend rejection;
-   * committed index advancement;
-   * applied index advancement;
-   * stableTo;
-   * stableSnapTo;
-   * restore snapshot;
-   * compacted error handling;
-   * unavailable error handling;
-   * snapshot temporarily unavailable handling;
-   * memory free paths.
+Use repository naming conventions if they already exist.
 
-8. Default behavior:
+Ownership:
 
-   * The default pure-Go raft implementation must remain unchanged.
-   * The C-backed implementation should remain behind the existing build tag.
-   * Existing default `go test ./...` must still pass.
+* `unstable.entries` must own its entry array and each entry’s data.
+* `unstable.snapshot` must own snapshot data and metadata arrays.
+* Storage-backed entries returned by `raft_storage_ops_t.entries` are C-owned callback outputs and must be freed after copying or consuming according to ownership design.
+* Do not store Go memory pointers anywhere in `raftLog` or `unstable`.
+* All retained entries/snapshots must be C-owned deep copies or ownership-transferred C objects.
 
-9. Build-tagged validation:
-   Run:
+Required unstable functionality:
 
-   * default `go test ./...`
-   * C-backed/build-tagged tests, for example `go test -tags crawnode ./...`
-   * any C unit tests added for the log subsystem
+Port the behavior of Go unstable log helpers, including but not limited to:
 
-10. Produce PHASE5_C_LOG_SUBSYSTEM_RESULT.md summarizing:
+```text
+maybeFirstIndex
+maybeLastIndex
+maybeTerm
+stableTo
+stableSnapTo
+restore
+truncateAndAppend
+slice
+nextEntries / unstableEntries equivalent
+acceptInProgress / acceptUnstable equivalent if present in v3.7.0
+```
 
-* files changed,
-* C log structs added,
-* functions implemented,
-* mapping from Go log functions to C functions,
-* storage callback usage,
-* memory ownership decisions,
-* tests added,
-* test results,
-* remaining gaps before porting the full raft state machine.
+Exact names may differ. Match Go semantics, not necessarily Go names.
 
-Important:
-This phase is about the log subsystem only. Do not implement full leader election, message handling, progress tracker, read-only logic, or full RawNode behavior yet unless absolutely necessary for isolated log tests.
+Important requirements:
 
+* `maybeTerm(i)` must check unstable snapshot metadata and unstable entries.
+* `stableTo(index, term)` must only advance unstable offset when index/term match.
+* `stableSnapTo(index)` must clear the unstable snapshot only when index matches.
+* `restore(snapshot)` must replace unstable state consistently with the snapshot metadata.
+* `truncateAndAppend` must handle:
+
+  * append directly after current unstable end,
+  * replace all unstable entries,
+  * truncate suffix and append.
+* Empty slices/arrays must be represented safely.
+* Entry data ownership must be clear and leak-free.
+
+Required raftLog functionality:
+
+Port the behavior of Go `raftLog` helpers, including but not limited to:
+
+```text
+newLogWithSize / constructor from storage
+firstIndex
+lastIndex
+lastTerm
+term
+matchTerm
+zeroTermOnErrCompacted
+append
+findConflict
+findConflictByTerm
+maybeAppend
+maybeCommit
+commitTo
+appliedTo
+acceptApplying
+stableTo
+stableSnapTo
+restore
+nextCommittedEnts
+hasNextCommittedEnts
+hasNextOrInProgressCommittedEnts, if present
+unstableEntries
+hasNextUnstableEnts, if present
+nextUnstableEnts, if present
+slice
+scan
+mustCheckOutOfBounds
+isUpToDate
+```
+
+Do not blindly implement names that do not exist in v3.7.0; inspect the actual source and port the equivalent behavior.
+
+Storage-backed access requirements:
+
+`raft_log_term`, `raft_log_slice`, `raft_log_first_index`, `raft_log_last_index`, and snapshot-related helpers must correctly combine:
+
+```text
+unstable state
++
+storage-backed stable state
+```
+
+Semantics:
+
+* Prefer unstable data when index lies in unstable range.
+* Fall back to storage callbacks when index lies in stable range.
+* Respect snapshot metadata for terms at snapshot index.
+* Correctly propagate storage errors:
+
+  * compacted
+  * unavailable
+  * snapshot temporarily unavailable
+  * out of bounds / invalid argument
+* Preserve Go behavior for `zeroTermOnErrCompacted`.
+
+Do not call Go Storage per entry. Keep storage `Entries(lo, hi, maxSize)` batched.
+
+Committed/applied/applying requirements:
+
+Preserve Go v3.7.0 semantics for:
+
+* `committed`
+* `applying`
+* `applied`
+
+Requirements:
+
+* `commitTo(tocommit)` must never decrease committed.
+* `commitTo(tocommit)` must panic/assert/fatal-equivalent if committing beyond last index, matching Go behavior policy.
+* `appliedTo(i)` must never move applied backward and must reject applying beyond committed.
+* `acceptApplying(index, size, allowUnstable)` must follow Go semantics and interact correctly with `applying`.
+* `nextCommittedEnts(allowUnstable)` must return entries after applied/applying up to committed according to Go semantics.
+* `hasNextCommittedEnts(allowUnstable)` must match Go readiness behavior.
+* `allowUnstable` corresponds to RawNode’s internal `applyUnstableEntries = !asyncStorageWrites`.
+* Do not expose `applyUnstableEntries` as a public API.
+
+Ready/Advance integration requirements:
+
+This phase should prepare the log subsystem for existing/future C RawNode Ready/Advance implementation.
+
+Ensure C log provides the primitives needed by:
+
+* `raft_raw_node_has_ready`
+* `raft_raw_node_ready`
+* `raft_raw_node_ready_without_accept`, if present
+* `raft_raw_node_accept_ready`, if present
+* `raft_raw_node_advance`
+
+Specifically:
+
+* unstable entries must be obtainable for `Ready.Entries`.
+* committed entries must be obtainable for `Ready.CommittedEntries`.
+* unstable snapshot must be obtainable for `Ready.Snapshot`.
+* after Ready is accepted, unstable entries/snapshot must be marked in progress as Go does.
+* after Advance/stable notification, `stableTo` and `stableSnapTo` must clear stable unstable state.
+* Do not require passing Go `Ready` back into C for `Advance`.
+
+Snapshot requirements:
+
+Implement log/unstable snapshot semantics:
+
+* restore from snapshot,
+* term lookup at snapshot index,
+* first index and last index behavior with snapshot,
+* stable snapshot clearing,
+* storage snapshot fallback,
+* snapshot metadata ConfState ownership.
+
+Do not implement etcd snapshot transport. This phase is only log/snapshot metadata and C-owned snapshot object handling inside raft log.
+
+Entry size / max size requirements:
+
+Port Go v3.7.0 entry size limiting behavior used by:
+
+* `Entries(lo, hi, maxSize)`
+* `slice`
+* `limitSize`
+* committed entry batching
+* max applying entries size, if present.
+
+If the exact protobuf encoded size helper is not yet available in C, implement a documented skeleton approximation only if necessary, and mark it clearly as a correctness/performance gap. Prefer implementing the actual size calculation only if the repository already has raftpb encoding helpers.
+
+Error and fatal policy:
+
+Follow `ERROR_MAPPING_FOR_C_PORT.md`.
+
+For internal Go panics in log code, use the repository’s C policy:
+
+* assert in internal tests,
+* return `RAFT_ERR_FATAL` for recoverable API boundary failures,
+* or use the existing skeleton fatal/error convention.
+
+Do not silently ignore invariant violations.
+
+Important invariants to enforce:
+
+* `applied <= applying <= committed <= lastIndex`
+* unstable offset is consistent with unstable entries
+* snapshot index/term and first index behavior are consistent
+* no retained Go pointers
+* committed entries returned are ordered and contiguous
+* appending conflicting entries truncates the unstable suffix correctly
+* storage compacted/unavailable errors are not collapsed incorrectly.
+
+C tests to add or port:
+
+Add focused C unit tests for log and unstable behavior. Use the repository’s C test framework and naming conventions.
+
+At minimum, cover:
+
+Unstable tests:
+
+1. `maybeFirstIndex` with/without snapshot.
+2. `maybeLastIndex` with snapshot and entries.
+3. `maybeTerm` for snapshot index, entry index, missing index.
+4. `stableTo` only advances when term matches.
+5. `stableSnapTo` only clears matching snapshot.
+6. `restore` resets offset and snapshot state.
+7. `truncateAndAppend` for direct append, full replacement, and suffix truncation.
+8. entry data ownership/deep-copy and free behavior.
+
+raftLog tests:
+
+1. constructor calls Storage.FirstIndex and LastIndex and initializes unstable offset correctly.
+2. `firstIndex` / `lastIndex` combine unstable and storage.
+3. `term` reads from unstable, snapshot, and storage as appropriate.
+4. `slice` combines storage entries and unstable entries over boundary.
+5. `append` and `findConflict` behavior.
+6. `maybeAppend` success and failure cases.
+7. `maybeCommit` and `commitTo` monotonicity.
+8. `appliedTo` and `acceptApplying` invariants.
+9. `nextCommittedEnts` and `hasNextCommittedEnts` with allowUnstable true/false.
+10. `stableTo` / `stableSnapTo` interaction with Ready-style progress.
+11. snapshot restore and subsequent term/first/last behavior.
+12. compacted/unavailable storage errors map to expected C errors.
+
+Storage-backed tests:
+
+* Use a small fake C storage implementation or test adapter.
+* Do not require Go/cgo for pure C log tests unless specifically testing the Go storage bridge.
+* Include at least one test where storage entries are returned as C-owned arrays and freed correctly.
+
+Differential guidance:
+
+If feasible, add comments or a deferred test plan for future Go-vs-C differential tests against Go v3.7.0 raftLog behavior. Do not build a large differential harness in this phase unless the repository already has one.
+
+Integration with existing C skeleton:
+
+Update C RawNode skeleton only as needed to use the new log subsystem cleanly. Do not implement elections, replication, progress tracker, confchange, or full message handling in this phase.
+
+If `raft_raw_node_new` currently creates a placeholder log, wire it to initialize `raft_log_t` from `raft_storage_ops_t`.
+
+If C RawNode is still otherwise skeleton-only, that is acceptable. Document which RawNode methods now have real log backing and which still return `RAFT_ERR_NOT_IMPLEMENTED`.
+
+Documentation updates:
+
+Update relevant docs/results to state:
+
+* C now has an internal `raftLog` / `unstable` subsystem.
+* Storage callbacks are used by the C log layer for stable entries/terms/snapshots.
+* unstable entries/snapshots are C-owned.
+* log subsystem is internal and not a public API.
+* Ready/Advance will rely on this subsystem for unstable entries, committed entries, and stable progress.
+* `applyUnstableEntries` remains an internal RawNode policy, not a public API.
+* no Go pointers are retained in log state.
+* snapshot data may be large and is C-owned once inside C log state.
+
+Build/test commands:
+
+Run C tests for the new log subsystem. Use existing Makefile targets if present.
+
+Run default Go tests:
+
+```bash
+go test ./...
+```
+
+If `/tmp` space is a problem:
+
+```bash
+mkdir -p .tmp .gocache
+TMPDIR=$PWD/.tmp GOTMPDIR=$PWD/.tmp GOCACHE=$PWD/.gocache go test ./...
+```
+
+Run the C-backed target:
+
+```bash
+make test-cgo-raft
+```
+
+Run any C test target, for example:
+
+```bash
+make test-c
+```
+
+or the repository’s existing equivalent.
+
+If `make test-cgo-raft` fails because higher-level C consensus remains skeleton-only, distinguish:
+
+* log subsystem failures that must be fixed now,
+* expected not-yet-implemented raft core failures that should be documented as deferred.
+
+Deliverable:
+
+Create or update:
+
+```text
+PHASE6_C_RAFT_LOG_SUBSYSTEM_RESULT.md
+```
+
+Include:
+
+* files inspected,
+* existing docs/results used,
+* C files changed/created,
+* raftLog functions implemented,
+* unstable functions implemented,
+* storage-backed access implemented,
+* ownership and free rules,
+* snapshot handling,
+* committed/applied/applying behavior,
+* error mapping,
+* tests added/updated,
+* commands run and results,
+* remaining gaps,
+* deferred work for later raft core phases.
+
+Do not broaden this task beyond the C raftLog / unstable / storage-backed log subsystem unless required to fix directly related compile errors.

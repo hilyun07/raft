@@ -156,9 +156,10 @@ int raft_raw_node_advance(raft_raw_node_t *rn);
 The future C RawNode tracks the accepted Ready internally, matching current Go
 RawNode behavior. Go does not reconstruct or pass Ready back. This safety
 change advanced the private skeleton ABI marker to version 6. The subsequent
-explicit progress-snapshot API rename advanced it to 7, and removal of the
-redundant two-ID leadership-transfer declaration advanced it to 8. The Phase
-4 Node-boundary helper additions leave the current marker at version 9.
+explicit progress-snapshot API rename advanced it to 7, removal of the
+redundant two-ID leadership-transfer declaration advanced it to 8, and Phase
+4 Node-boundary helpers advanced it to 9. Phase 6's private log ownership
+advances the current marker to version 10.
 
 ## Output conversion
 

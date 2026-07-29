@@ -262,6 +262,27 @@ persistence/application completion path advances them. Freeing a C Ready is a
 memory action only; it must not imply acceptance, persistence, application, or
 Advance.
 
+### Phase 6 internal log support
+
+The private C core now has `raft_log_t`/`raft_unstable_t` primitives for this
+protocol:
+
+- copying out the next unstable entries and snapshot;
+- marking those objects in progress when a Ready is accepted;
+- stabilizing matching entries by index and term;
+- clearing only a matching stable snapshot index;
+- copying out the next committed entries subject to `allow_unstable`;
+- tracking committed, applying, applied, and applying-byte quota state.
+
+Unstable entries, their Data fields, and unstable snapshot graphs are
+C-owned. Storage callback results are also C-owned and are freed after the log
+copies or consumes them. No Go pointer is retained. These primitives are
+internal preparation only: `raft_raw_node_ready`,
+`raft_raw_node_accept_ready`, and `raft_raw_node_advance` remain
+`RAFT_ERR_NOT_IMPLEMENTED` until the Ready/core phase wires the bookkeeping
+together. `allow_unstable` remains an internal policy derived from
+`!AsyncStorageWrites`; it is not public API.
+
 ## Persistence and delivery ordering
 
 ### Synchronous storage mode

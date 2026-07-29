@@ -20,6 +20,8 @@
 // The C skeleton lives in a separate subtree so default pure-Go builds never
 // require a C compiler. This tagged translation unit incorporates it only for
 // the opt-in cgo binding build.
+#include "unstable.c"
+#include "log.c"
 #include "raw_node.c"
 
 void raft_go_storage_ops_init(raft_storage_ops_t *ops, uintptr_t handle) {

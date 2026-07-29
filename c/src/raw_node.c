@@ -664,6 +664,7 @@ void raft_raw_node_destroy(raft_raw_node_t *raw_node) {
     if (raw_node == NULL) {
         return;
     }
+    raft_log_free(&raw_node->log);
     memset(raw_node, 0, sizeof(*raw_node));
     free(raw_node);
 }
@@ -700,6 +701,18 @@ int raft_raw_node_new(const raft_config_t *config,
     raw_node->abi_version = RAFT_RAW_NODE_ABI_VERSION;
     raw_node->config = *config;
     raw_node->storage = *storage;
+    {
+        uint64_t max_applying_size =
+            config->max_committed_size_per_ready != 0
+                ? config->max_committed_size_per_ready
+                : config->max_size_per_message;
+        int result = raft_log_init(
+            &raw_node->log, &raw_node->storage, max_applying_size);
+        if (result != RAFT_OK) {
+            free(raw_node);
+            return result;
+        }
+    }
     *out = raw_node;
     return RAFT_OK;
 }
@@ -876,6 +889,7 @@ int raft_raw_node_basic_status(const raft_raw_node_t *raw_node,
     status->hard_state.vote = RAFT_NONE;
     status->soft_state.lead = RAFT_NONE;
     status->soft_state.raft_state = RAFT_STATE_FOLLOWER;
+    status->applied = raw_node->log.applied;
     status->lead_transferee = RAFT_NONE;
     return RAFT_OK;
 }

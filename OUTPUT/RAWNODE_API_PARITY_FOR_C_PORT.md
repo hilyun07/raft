@@ -26,6 +26,17 @@ change production code.
 return success for work it did not perform, and storage-unavailable must not
 be reused to mean unimplemented.
 
+## Current log-subsystem implementation note
+
+The repository's later execution prompt names the log/unstable work
+“Phase 6,” while the original planning table above called that responsibility
+Phase 5. The implemented milestone is unambiguous: the private C
+`raft_log_t`/`raft_unstable_t` layer now initializes through Storage
+`FirstIndex`/`LastIndex`, batches stable range reads, owns unstable
+entries/snapshots, and exposes the bookkeeping primitives needed by Ready.
+This does not implement the table's “basic C Raft state machine” milestone;
+consensus-dependent RawNode methods remain stubs.
+
 ## Required API matrix
 
 | Go operation | C public API required? | Phase 2 stub? | Real semantics phase | Important semantic traps |

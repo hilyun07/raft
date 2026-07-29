@@ -15,10 +15,10 @@
 #ifndef ETCD_RAFT_RAFT_INTERNAL_H
 #define ETCD_RAFT_RAFT_INTERNAL_H
 
-#include "raft/raft.h"
+#include "log.h"
 
 enum {
-    RAFT_RAW_NODE_ABI_VERSION = 9,
+    RAFT_RAW_NODE_ABI_VERSION = 10,
 };
 
 // The public header intentionally exposes only typedef struct raft_raw_node.
@@ -27,6 +27,7 @@ struct raft_raw_node {
     uint32_t abi_version;
     raft_config_t config;
     raft_storage_ops_t storage;
+    raft_log_t log;
 };
 
 #endif  // ETCD_RAFT_RAFT_INTERNAL_H

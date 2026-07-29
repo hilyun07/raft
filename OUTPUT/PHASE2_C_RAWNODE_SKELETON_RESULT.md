@@ -1,9 +1,11 @@
 # Phase 2: C RawNode Public API Skeleton Result
 
 The C skeleton now reflects the full RawNode surface tracked by the follow-up
-planning documents. It remains an inert, compile-safe API boundary: no Raft
-election, log, tracker, quorum, read-only, configuration-change, snapshot, or
-Ready/Advance consensus logic was ported.
+planning documents. It remains a compile-safe API boundary with no Raft
+election, tracker, quorum, read-only, configuration-change, or Ready/Advance
+consensus logic. Phase 6 subsequently added the private `raft_log_t` and
+`raft_unstable_t` subsystem described below; this does not make the RawNode
+consensus stubs operational.
 
 The existing pure-Go implementation remains the default and does not import
 cgo or compile the C subtree.
@@ -13,7 +15,7 @@ cgo or compile the C subtree.
 | File | Change |
 | --- | --- |
 | `c/include/raft/raft.h` | Expanded the public ABI with opaque RawNode ownership, sentinels, helpers, error taxonomy, raftpb-compatible enums/types, borrowed/owned byte wrappers, callback shapes, complete RawNode declarations, and ownership/free APIs. |
-| `c/src/raft_internal.h` | Retained the private RawNode layout; the later Phase 4 Node-boundary helper additions leave the skeleton ABI marker at version 9. |
+| `c/src/raft_internal.h` | Retained the private RawNode layout; Phase 6 adds an owned internal `raft_log_t` and advances the private marker to version 10. |
 | `c/src/raw_node.c` | Added external sentinel/payload validators, recursive view-to-owned deep-copy helpers, owned frees, shallow API/config validation, lifecycle allocation, inert status, and `RAFT_ERR_NOT_IMPLEMENTED` stubs. |
 | `c/tests/raw_node_skeleton_test.c` | Expanded public-header-only tests for enum values, sentinels, lifecycle, every stub family, view/owned nil-empty validation, recursive copies, reserved IDs, and owned frees. |
 | `OUTPUT/PHASE2_C_RAWNODE_SKELETON_RESULT.md` | Replaced the earlier partial result with this full tracked-surface result. |
@@ -30,9 +32,11 @@ The public header exposes only:
 typedef struct raft_raw_node raft_raw_node_t;
 ```
 
-The private header currently stores only an ABI marker, normalized/copied
-configuration, and copied storage callback table. It contains no consensus
-state and no raw Go pointer.
+The private header stores an ABI marker, normalized/copied configuration,
+copied storage callback table, and—after Phase 6—an owned private
+`raft_log_t`. The log contains C-owned unstable entries/snapshot state and
+uses the copied callback table for stable storage access. It contains no Raft
+role/election/progress state and no raw Go pointer.
 
 Phase 4 subsequently added two binding-only boundary helpers:
 
@@ -59,9 +63,11 @@ non-local peers remains deferred until the C progress tracker exists. After
 the available validation, Step reaches the compile-safe core stub and returns
 `RAFT_ERR_NOT_IMPLEMENTED`; HasProgress returns false until the tracker phase.
 
-`raft_raw_node_new` validates pointer/config/callback-table shape and allocates
-the inert handle. Allocation failure returns `RAFT_ERR_OUT_OF_MEMORY`.
-`raft_raw_node_destroy` zeroes and frees it and accepts null.
+`raft_raw_node_new` validates pointer/config/callback-table shape, allocates
+the handle, and now initializes its log by calling Storage `FirstIndex` and
+`LastIndex`. Allocation failure returns `RAFT_ERR_OUT_OF_MEMORY`; callback
+errors are propagated. `raft_raw_node_destroy` recursively frees the log,
+zeroes and frees the handle, and accepts null.
 
 ## Sentinel node IDs
 
@@ -327,13 +333,15 @@ without adding per-field or per-entry cgo builder calls.
 - LastIndex;
 - Snapshot.
 
-The constructor copies but does not invoke the table. The handle is documented
-as suitable for `runtime/cgo.Handle` and must not be a raw Go pointer.
-Phase 5 implements `raft_go_storage_ops_init`, all six exported Go callbacks,
-and a private C call-through harness used by bridge tests. Exported callbacks
-batch-copy Entries and Snapshot results into C-owned non-view graphs before
-returning. Entries is one array result per range callback, not one Go callback
-per entry; C frees owned callback results when finished.
+The constructor copies the table rather than retaining its address. The handle
+is suitable for `runtime/cgo.Handle` and must not be a raw Go pointer. Phase 5
+implements `raft_go_storage_ops_init`, all six exported Go callbacks, and a
+private C call-through harness used by bridge tests. Phase 6 invokes
+`FirstIndex`/`LastIndex` during C log construction and lets the private log
+consume batched `Entries`, `Term`, and owned `Snapshot` results. Exported
+callbacks batch-copy Entries and Snapshot results into C-owned non-view graphs
+before returning. Entries is one array result per range callback, not one Go
+callback per entry; C frees owned callback results when finished.
 
 `raft_logger_ops_t` reserves an opaque handle plus log callback shape. The
 current RawNode does not accept, store, or call it. Logger/TraceLogger bridging
@@ -358,8 +366,10 @@ argument validation:
 
 The following have safe skeleton results:
 
-- `new`/`destroy`: real allocation lifecycle (`RAFT_OK` on success);
-- `basic_status`/`status`: inert fixed snapshot (`RAFT_OK`);
+- `new`/`destroy`: real allocation lifecycle plus private log initialization
+  and cleanup (`RAFT_OK` on success);
+- `basic_status`/`status`: fixed skeleton state with the log's real applied
+  index (`RAFT_OK`);
 - `has_ready`: false because the skeleton creates no work;
 - `tick`/`tick_quiesced`: void no-op required by their signatures.
 

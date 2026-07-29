@@ -107,7 +107,8 @@ subsequent C-owned Ready/argument-free Advance safety correction advanced it
 to 6, the explicit progress-snapshot API rename advanced it to 7, and removal
 of the redundant two-ID leadership-transfer declaration advanced it to 8.
 The later Phase 4 Node-boundary helper additions leave the current marker at
-version 9.
+version 9 for that milestone. Phase 6's private log ownership advances the
+current marker to version 10.
 
 ## Validation
 

@@ -36,7 +36,8 @@ the subsequent type-separated aggregate and Ready/Advance safety corrections
 advanced it to version 6, the explicit progress-snapshot API rename advanced
 it to 7, and removal of the redundant two-ID leadership-transfer declaration
 advanced it to 8. The later Phase 4 boundary-helper additions leave the
-current marker at version 9.
+marker at version 9 for that milestone. Phase 6's private log ownership
+advances the current marker to version 10.
 
 ## Null and nil semantics
 

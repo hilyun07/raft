@@ -110,7 +110,8 @@ so no obsolete implementation body had to be deleted.
   declaration was removed.
 
 The subsequent Phase 4 Node-boundary helper additions advance the current
-private skeleton marker to 9.
+private skeleton marker to 9. Phase 6's private log ownership later advances
+the current marker to 10.
 
 ### Documentation and future phase instructions
 
