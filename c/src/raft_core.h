@@ -15,23 +15,9 @@
 #ifndef ETCD_RAFT_CORE_H
 #define ETCD_RAFT_CORE_H
 
+#include "confchange.h"
 #include "log.h"
 
-typedef struct raft_basic_progress_internal {
-    uint64_t id;
-    uint64_t match_index;
-    uint64_t next_index;
-    raft_progress_state_t state;
-    uint64_t pending_snapshot;
-    bool recent_active;
-    bool message_flow_paused;
-    bool is_learner;
-    bool vote_recorded;
-    bool vote_granted;
-} raft_basic_progress_internal_t;
-
-// Minimal Phase 7 state machine. This deliberately does not contain the full
-// tracker/quorum/read-only/confchange machinery.
 typedef struct raft {
     uint64_t id;
     uint64_t term;
@@ -41,9 +27,7 @@ typedef struct raft {
     raft_state_t state;
 
     raft_log_t *log;
-    raft_conf_state_t conf_state;
-    raft_basic_progress_internal_t *progress;
-    size_t progress_len;
+    raft_progress_tracker_t tracker;
 
     raft_message_vec_t messages;
 
@@ -56,7 +40,10 @@ typedef struct raft {
     uint64_t max_size_per_message;
     uint64_t max_uncommitted_entries_size;
     uint64_t uncommitted_size;
+    uint64_t pending_conf_index;
     bool disable_proposal_forwarding;
+    bool disable_conf_change_validation;
+    bool step_down_on_removal;
 
     // Sticky fatal/callback/storage failure produced by a void Tick call.
     int error;
@@ -75,6 +62,15 @@ int raft_core_tick(raft_t *raft);
 void raft_core_tick_quiesced(raft_t *raft);
 int raft_core_campaign(raft_t *raft);
 int raft_core_propose(raft_t *raft, const raft_byte_view_t *data);
+int raft_core_propose_conf_change_v1(
+    raft_t *raft, const raft_conf_change_view_t *change);
+int raft_core_propose_conf_change_v2(
+    raft_t *raft, const raft_conf_change_v2_view_t *change);
+int raft_core_apply_conf_change(
+    raft_t *raft,
+    const raft_conf_change_v2_view_t *change,
+    raft_conf_state_t *out);
+int raft_core_maybe_auto_leave(raft_t *raft, uint64_t applied);
 int raft_core_step(raft_t *raft, const raft_message_view_t *message);
 
 void raft_core_hard_state(const raft_t *raft, raft_hard_state_t *state);

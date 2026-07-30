@@ -60,8 +60,8 @@ typedef enum raft_error {
     RAFT_ERR_PANIC_FROM_GO_CALLBACK = 9,
     RAFT_ERR_OUT_OF_MEMORY = 10,
     RAFT_ERR_FATAL = 11,
-    // Consensus-dependent skeleton operations return NOT_IMPLEMENTED until
-    // their corresponding later porting phase supplies real semantics.
+    // Operations whose subsystem has not yet been ported return this error
+    // explicitly.
     RAFT_ERR_NOT_IMPLEMENTED = 12,
 } raft_error_t;
 
@@ -354,17 +354,24 @@ typedef struct raft_ready {
 } raft_ready_t;
 
 // Legacy raftpb.ConfChange representation. The id field is etcd-visible
-// legacy metadata and has no ConfChangeV2 counterpart.
+// legacy metadata and has no ConfChangeV2 counterpart. The has_* bits retain
+// optional scalar presence so proposals reproduce the Go protobuf wire form;
+// application semantics still use the scalar zero values when absent.
 typedef struct raft_conf_change_view {
     uint64_t id;
     raft_conf_change_type_t type;
     uint64_t node_id;
     raft_byte_view_t context;
+    bool has_id;
+    bool has_type;
+    bool has_node_id;
 } raft_conf_change_view_t;
 
 typedef struct raft_conf_change_single {
     raft_conf_change_type_t type;
     uint64_t node_id;
+    bool has_type;
+    bool has_node_id;
 } raft_conf_change_single_t;
 
 typedef struct raft_conf_change_v2_view {
@@ -372,6 +379,7 @@ typedef struct raft_conf_change_v2_view {
     const raft_conf_change_single_t *changes;
     size_t changes_len;
     raft_byte_view_t context;
+    bool has_transition;
 } raft_conf_change_v2_view_t;
 
 typedef struct raft_progress {
@@ -541,22 +549,29 @@ void raft_raw_node_destroy(raft_raw_node_t *raw_node);
 //   makes one RawNode cgo call, and frees all temporary descriptors
 //   immediately afterward. Nested byte data may point to pointer-free Go byte
 //   backing arrays only during that call. C never retains a view pointer.
-// Field-by-field builder calls are intentionally not part of this skeleton.
+// Field-by-field builder calls are intentionally not part of this ABI.
 
-// Phase 7 implements deterministic election/heartbeat ticking. Fatal,
+// Fatal,
 // allocation, or callback errors reached through this void API become sticky
 // and are returned by the next error-returning RawNode operation.
 void raft_raw_node_tick(raft_raw_node_t *raw_node);
 void raft_raw_node_tick_quiesced(raft_raw_node_t *raw_node);
 
-// Bootstrap, campaign, and normal proposals have minimal Phase 7 semantics.
-// ConfChangeV2 proposal/application remains explicitly unimplemented.
+// Bootstrap, campaign, normal proposals, and configuration changes are
+// implemented by the C Raft core.
 int raft_raw_node_bootstrap(raft_raw_node_t *raw_node,
                             const raft_peer_view_t *peers,
                             size_t peer_count);
 int raft_raw_node_campaign(raft_raw_node_t *raw_node);
 int raft_raw_node_propose(raft_raw_node_t *raw_node,
                           const raft_byte_view_t *data);
+// Proposes a legacy EntryConfChange while preserving its legacy ID and entry
+// type. This supplemental entry point is used by the Go ConfChangeI wrapper.
+int raft_raw_node_propose_conf_change_v1(
+    raft_raw_node_t *raw_node,
+    const raft_conf_change_view_t *conf_change);
+// A NULL descriptor proposes the nil-data ConfChangeV2 used to leave an
+// auto-leave joint configuration.
 int raft_raw_node_propose_conf_change(
     raft_raw_node_t *raw_node,
     const raft_conf_change_v2_view_t *conf_change);
@@ -578,7 +593,7 @@ int raft_raw_node_step(raft_raw_node_t *raw_node,
 int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
                                 const raft_message_view_t *message);
 
-// Reports Phase 7 SoftState, HardState, unstable entries/snapshot, committed
+// Reports SoftState, HardState, unstable entries/snapshot, committed
 // entries, and queued outbound message work.
 bool raft_raw_node_has_ready(const raft_raw_node_t *raw_node);
 // These functions return a C-owned outer descriptor and nested graph. A Go

@@ -215,12 +215,13 @@ static void test_lifecycle_and_minimal_core(void) {
     assert(status.progress == NULL);
     assert(status.progress_len == 0);
 
-    // Advanced Phase 7 operations remain explicit stubs.
+    // Membership calls are active in Phase 8. Without a leader, proposals
+    // are dropped, and leaving a non-joint empty configuration is invalid.
     assert(raft_raw_node_propose_conf_change(raw_node, &conf_change) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_PROPOSAL_DROPPED);
     assert(raft_raw_node_apply_conf_change(raw_node, &conf_change,
                                            &conf_state) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_FATAL);
     assert(raft_raw_node_read_index(
                raw_node, &(raft_byte_view_t){&byte, 1, 0}) ==
            RAFT_ERR_NOT_IMPLEMENTED);
@@ -421,11 +422,21 @@ static void test_node_id_boundary_validation(void) {
 
     for (i = 0; i < sizeof(reserved_ids) / sizeof(reserved_ids[0]); ++i) {
         change.node_id = reserved_ids[i];
-        assert(raft_raw_node_propose_conf_change(raw_node, &conf_change) ==
-               RAFT_ERR_INVALID_ARGUMENT);
-        assert(raft_raw_node_apply_conf_change(raw_node, &conf_change,
-                                               &conf_state) ==
-               RAFT_ERR_INVALID_ARGUMENT);
+        if (change.node_id == RAFT_NONE) {
+            assert(raft_raw_node_propose_conf_change(
+                       raw_node, &conf_change) ==
+                   RAFT_ERR_PROPOSAL_DROPPED);
+            assert(raft_raw_node_apply_conf_change(
+                       raw_node, &conf_change, &conf_state) ==
+                   RAFT_ERR_FATAL);
+        } else {
+            assert(raft_raw_node_propose_conf_change(
+                       raw_node, &conf_change) ==
+                   RAFT_ERR_INVALID_ARGUMENT);
+            assert(raft_raw_node_apply_conf_change(
+                       raw_node, &conf_change, &conf_state) ==
+                   RAFT_ERR_INVALID_ARGUMENT);
+        }
         peer.id = reserved_ids[i];
         assert(raft_raw_node_bootstrap(raw_node, &peer, 1) ==
                RAFT_ERR_INVALID_ARGUMENT);
@@ -440,17 +451,17 @@ static void test_node_id_boundary_validation(void) {
 
     change.node_id = 2;
     assert(raft_raw_node_propose_conf_change(raw_node, &conf_change) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_PROPOSAL_DROPPED);
     assert(raft_raw_node_apply_conf_change(raw_node, &conf_change,
                                            &conf_state) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
 
     // Empty V2 changes can represent leaving joint configuration and have no
     // member ID to validate.
     conf_change.changes = NULL;
     conf_change.changes_len = 0;
     assert(raft_raw_node_propose_conf_change(raw_node, &conf_change) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_PROPOSAL_DROPPED);
 
     // A non-empty list must provide its change records.
     conf_change.changes_len = 1;
@@ -678,10 +689,10 @@ static void test_temporary_aggregate_descriptors(void) {
         (raft_byte_view_t){context, sizeof(context), false};
     assert(raft_raw_node_propose_conf_change(raw_node,
                                              &conf_change->value) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_ERR_PROPOSAL_DROPPED);
     assert(raft_raw_node_apply_conf_change(raw_node, &conf_change->value,
                                            &conf_state) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
 
     message->entry.type = RAFT_ENTRY_NORMAL;
     message->entry.term = 1;

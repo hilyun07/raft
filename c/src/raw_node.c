@@ -96,9 +96,8 @@ static bool conf_change_transition_valid(
            transition <= RAFT_CONF_CHANGE_TRANSITION_JOINT_EXPLICIT;
 }
 
-// This validates the strict public C API. A future internal compatibility
-// path may still ignore a zero node ID when replaying a Go configuration
-// change, but reserved IDs must never enter C membership state.
+// A zero node ID is an etcd compatibility no-op when a configuration change
+// is applied. The C-only local target sentinels remain invalid membership IDs.
 static bool public_conf_change_v2_valid(
     const raft_conf_change_v2_view_t *conf_change) {
     size_t i;
@@ -114,11 +113,21 @@ static bool public_conf_change_v2_valid(
     for (i = 0; i < conf_change->changes_len; ++i) {
         const raft_conf_change_single_t *change = &conf_change->changes[i];
         if (!conf_change_type_valid(change->type) ||
-            !raft_is_valid_node_id(change->node_id)) {
+            (change->node_id != RAFT_NONE &&
+             !raft_is_valid_node_id(change->node_id))) {
             return false;
         }
     }
     return true;
+}
+
+static bool public_conf_change_v1_valid(
+    const raft_conf_change_view_t *conf_change) {
+    return conf_change != NULL &&
+           raft_byte_view_valid(&conf_change->context) &&
+           conf_change_type_valid(conf_change->type) &&
+           (conf_change->node_id == RAFT_NONE ||
+            raft_is_valid_node_id(conf_change->node_id));
 }
 
 static bool message_type_valid(raft_message_type_t type) {
@@ -821,8 +830,8 @@ int raft_raw_node_new(const raft_config_t *config,
     if (!config_valid(config) || !storage_ops_valid(storage)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    // Phase 7 deliberately rejects advanced behavior rather than silently
-    // running it with the minimal election/replication implementation.
+    // Subsystems not ported yet remain explicit rather than silently running
+    // with incomplete semantics.
     if (config->async_storage_writes || config->check_quorum ||
         config->pre_vote ||
         config->read_only_option == RAFT_READ_ONLY_LEASE_BASED) {
@@ -919,10 +928,23 @@ int raft_raw_node_propose_from_parts(raft_raw_node_t *raw_node,
 int raft_raw_node_propose_conf_change(
     raft_raw_node_t *raw_node,
     const raft_conf_change_v2_view_t *conf_change) {
-    if (raw_node == NULL || !public_conf_change_v2_valid(conf_change)) {
+    if (raw_node == NULL ||
+        (conf_change != NULL &&
+         !public_conf_change_v2_valid(conf_change))) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    return RAFT_ERR_NOT_IMPLEMENTED;
+    return raft_core_propose_conf_change_v2(
+        &raw_node->raft, conf_change);
+}
+
+int raft_raw_node_propose_conf_change_v1(
+    raft_raw_node_t *raw_node,
+    const raft_conf_change_view_t *conf_change) {
+    if (raw_node == NULL || !public_conf_change_v1_valid(conf_change)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    return raft_core_propose_conf_change_v1(
+        &raw_node->raft, conf_change);
 }
 
 int raft_raw_node_apply_conf_change(
@@ -936,7 +958,8 @@ int raft_raw_node_apply_conf_change(
     if (raw_node == NULL || !public_conf_change_v2_valid(conf_change)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    return RAFT_ERR_NOT_IMPLEMENTED;
+    return raft_core_apply_conf_change(
+        &raw_node->raft, conf_change, conf_state);
 }
 
 int raft_raw_node_step(raft_raw_node_t *raw_node,
@@ -1124,6 +1147,9 @@ int raft_raw_node_advance(raft_raw_node_t *raw_node) {
             raft_core_reduce_uncommitted(
                 &raw_node->raft,
                 raw_node->completion.applied_payload_size);
+            result = raft_core_maybe_auto_leave(
+                &raw_node->raft,
+                raw_node->completion.applied_index);
         }
     }
     if (result == RAFT_OK) {

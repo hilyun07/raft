@@ -17,11 +17,14 @@
 package raft
 
 import (
+	"bytes"
 	"errors"
+	"reflect"
 	"testing"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.etcd.io/raft/v3/tracker"
+	"google.golang.org/protobuf/proto"
 )
 
 func cgoSkeletonConfig() *Config {
@@ -67,12 +70,8 @@ func TestCGoRawNodeMinimalCoreLifecycleAndBoundary(t *testing.T) {
 		t.Fatalf("unexpected Status: %+v", status)
 	}
 
-	for name, err := range map[string]error{
-		"ProposeConfChange": rn.ProposeConfChange(&pb.ConfChangeV2{}),
-	} {
-		if !errors.Is(err, errCNotImplemented) {
-			t.Fatalf("%s error = %v, want not implemented", name, err)
-		}
+	if err := rn.ProposeConfChange(&pb.ConfChangeV2{}); !errors.Is(err, ErrProposalDropped) {
+		t.Fatalf("ProposeConfChange error = %v, want proposal dropped", err)
 	}
 	if err := rn.Propose(nil); !errors.Is(err, ErrProposalDropped) {
 		t.Fatalf("proposal without leader = %v, want proposal dropped", err)
@@ -157,5 +156,373 @@ func TestCGoRawNodeConfigValidation(t *testing.T) {
 	cfg.Storage = nil
 	if _, err := NewRawNode(cfg); err == nil {
 		t.Fatal("NewRawNode accepted nil Storage")
+	}
+}
+
+func cgoPersistAndAdvance(t *testing.T, rn *RawNode, storage *MemoryStorage, rd Ready) {
+	t.Helper()
+	if err := storage.Append(rd.Entries); err != nil {
+		t.Fatal(err)
+	}
+	if !IsEmptyHardState(rd.HardState) {
+		if err := storage.SetHardState(rd.HardState); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rn.Advance(rd)
+}
+
+func cgoSingleLeader(t *testing.T) (*RawNode, *MemoryStorage) {
+	t.Helper()
+	cfg := cgoSkeletonConfig()
+	storage := cfg.Storage.(*MemoryStorage)
+	rn, err := NewRawNode(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rn.Bootstrap([]Peer{{ID: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rn.Campaign(); err != nil {
+		t.Fatal(err)
+	}
+	cgoPersistAndAdvance(t, rn, storage, rn.Ready())
+	return rn, storage
+}
+
+func TestCGoRawNodeLegacyConfChangeProposal(t *testing.T) {
+	rn, _ := cgoSingleLeader(t)
+	defer rn.destroy()
+
+	cc := &pb.ConfChange{
+		Id:      new(uint64(9)),
+		Type:    pb.ConfChangeRemoveNode.Enum(),
+		NodeId:  new(uint64(2)),
+		Context: []byte("legacy"),
+	}
+	if err := rn.ProposeConfChange(cc); err != nil {
+		t.Fatal(err)
+	}
+	rd := rn.Ready()
+	if len(rd.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(rd.Entries))
+	}
+	entry := rd.Entries[0]
+	if entry.GetType() != pb.EntryConfChange {
+		t.Fatalf("entry type = %v, want EntryConfChange", entry.GetType())
+	}
+	wantData, err := proto.Marshal(cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(entry.Data, wantData) {
+		t.Fatalf("entry data = %x, want %x", entry.Data, wantData)
+	}
+	var decoded pb.ConfChange
+	if err := proto.Unmarshal(entry.Data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GetId() != 9 ||
+		decoded.GetType() != pb.ConfChangeRemoveNode ||
+		decoded.GetNodeId() != 2 ||
+		string(decoded.Context) != "legacy" {
+		t.Fatalf("decoded legacy change = %+v", decoded)
+	}
+}
+
+func TestCGoRawNodeConfChangeV2PreservesScalarPresence(t *testing.T) {
+	rn, _ := cgoSingleLeader(t)
+	defer rn.destroy()
+
+	cc := &pb.ConfChangeV2{
+		Transition: pb.ConfChangeTransitionAuto.Enum(),
+		Changes: []*pb.ConfChangeSingle{{
+			Type:   pb.ConfChangeAddNode.Enum(),
+			NodeId: new(uint64(0)),
+		}},
+		Context: []byte{},
+	}
+	if err := rn.ProposeConfChange(cc); err != nil {
+		t.Fatal(err)
+	}
+	rd := rn.Ready()
+	if len(rd.Entries) != 1 ||
+		rd.Entries[0].GetType() != pb.EntryConfChangeV2 {
+		t.Fatalf("V2 proposal entries = %+v", rd.Entries)
+	}
+	wantData, err := proto.Marshal(cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rd.Entries[0].Data, wantData) {
+		t.Fatalf("V2 entry data = %x, want %x", rd.Entries[0].Data, wantData)
+	}
+}
+
+func TestCGoRawNodeAllowsOnlyOnePendingConfChange(t *testing.T) {
+	rn, _ := cgoSingleLeader(t)
+	defer rn.destroy()
+
+	first := &pb.ConfChange{
+		Type:   pb.ConfChangeAddNode.Enum(),
+		NodeId: new(uint64(2)),
+	}
+	second := &pb.ConfChange{
+		Type:   pb.ConfChangeAddLearnerNode.Enum(),
+		NodeId: new(uint64(3)),
+	}
+	if err := rn.ProposeConfChange(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := rn.ProposeConfChange(second); err != nil {
+		t.Fatal(err)
+	}
+	rd := rn.Ready()
+	if len(rd.Entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(rd.Entries))
+	}
+	if rd.Entries[0].GetType() != pb.EntryConfChange ||
+		rd.Entries[1].GetType() != pb.EntryNormal ||
+		rd.Entries[1].Data != nil {
+		t.Fatalf("pending conf entries = %+v", rd.Entries)
+	}
+}
+
+func TestCGoRawNodeApplySimpleMembershipChanges(t *testing.T) {
+	cfg := cgoSkeletonConfig()
+	rn, err := NewRawNode(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rn.destroy()
+	if err := rn.Bootstrap([]Peer{{ID: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	addLearner := &pb.ConfChange{
+		Type:   pb.ConfChangeAddLearnerNode.Enum(),
+		NodeId: new(uint64(2)),
+	}
+	state := rn.ApplyConfChange(addLearner)
+	if !reflect.DeepEqual(state.Voters, []uint64{1}) ||
+		!reflect.DeepEqual(state.Learners, []uint64{2}) {
+		t.Fatalf("add learner ConfState = %+v", state)
+	}
+	if !rn.HasProgress(2) {
+		t.Fatal("learner has no progress")
+	}
+	var learnerType ProgressType
+	rn.WithProgress(func(id uint64, typ ProgressType, _ tracker.Progress) {
+		if id == 2 {
+			learnerType = typ
+		}
+	})
+	if learnerType != ProgressTypeLearner {
+		t.Fatalf("node 2 progress type = %v, want learner", learnerType)
+	}
+
+	zero := &pb.ConfChange{
+		Type:   pb.ConfChangeRemoveNode.Enum(),
+		NodeId: new(uint64(0)),
+	}
+	state = rn.ApplyConfChange(zero)
+	if !reflect.DeepEqual(state.Voters, []uint64{1}) ||
+		!reflect.DeepEqual(state.Learners, []uint64{2}) {
+		t.Fatalf("zero-ID no-op ConfState = %+v", state)
+	}
+
+	promote := &pb.ConfChange{
+		Type:   pb.ConfChangeAddNode.Enum(),
+		NodeId: new(uint64(2)),
+	}
+	state = rn.ApplyConfChange(promote)
+	if !reflect.DeepEqual(state.Voters, []uint64{1, 2}) ||
+		len(state.Learners) != 0 {
+		t.Fatalf("promote ConfState = %+v", state)
+	}
+
+	remove := &pb.ConfChange{
+		Type:   pb.ConfChangeRemoveNode.Enum(),
+		NodeId: new(uint64(2)),
+	}
+	state = rn.ApplyConfChange(remove)
+	if !reflect.DeepEqual(state.Voters, []uint64{1}) ||
+		rn.HasProgress(2) {
+		t.Fatalf("remove ConfState = %+v, hasProgress=%v", state, rn.HasProgress(2))
+	}
+
+	enterJoint := &pb.ConfChangeV2{
+		Transition: pb.ConfChangeTransitionJointExplicit.Enum(),
+		Changes: []*pb.ConfChangeSingle{
+			{Type: pb.ConfChangeRemoveNode.Enum(), NodeId: new(uint64(1))},
+			{Type: pb.ConfChangeAddNode.Enum(), NodeId: new(uint64(2))},
+		},
+	}
+	state = rn.ApplyConfChange(enterJoint)
+	if state.GetAutoLeave() ||
+		!reflect.DeepEqual(state.Voters, []uint64{2}) ||
+		!reflect.DeepEqual(state.VotersOutgoing, []uint64{1}) {
+		t.Fatalf("enter-joint ConfState = %+v", state)
+	}
+	state = rn.ApplyConfChange(&pb.ConfChangeV2{})
+	if len(state.VotersOutgoing) != 0 ||
+		!reflect.DeepEqual(state.Voters, []uint64{2}) ||
+		rn.HasProgress(1) {
+		t.Fatalf("leave-joint ConfState = %+v", state)
+	}
+}
+
+func TestCGoRawNodeJointAutoLeaveProposal(t *testing.T) {
+	rn, storage := cgoSingleLeader(t)
+	defer rn.destroy()
+
+	joint := &pb.ConfChangeV2{
+		Changes: []*pb.ConfChangeSingle{
+			{Type: pb.ConfChangeAddNode.Enum(), NodeId: new(uint64(2))},
+			{Type: pb.ConfChangeAddLearnerNode.Enum(), NodeId: new(uint64(3))},
+		},
+	}
+	if err := rn.ProposeConfChange(joint); err != nil {
+		t.Fatal(err)
+	}
+	rd := rn.Ready()
+	if len(rd.CommittedEntries) != 1 ||
+		rd.CommittedEntries[0].GetType() != pb.EntryConfChangeV2 {
+		t.Fatalf("joint committed entries = %+v", rd.CommittedEntries)
+	}
+	wantData, err := proto.Marshal(joint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rd.CommittedEntries[0].Data, wantData) {
+		t.Fatalf("joint entry data = %x, want %x", rd.CommittedEntries[0].Data, wantData)
+	}
+	state := rn.ApplyConfChange(joint)
+	if !state.GetAutoLeave() ||
+		!reflect.DeepEqual(state.Voters, []uint64{1, 2}) ||
+		!reflect.DeepEqual(state.VotersOutgoing, []uint64{1}) ||
+		!reflect.DeepEqual(state.Learners, []uint64{3}) {
+		t.Fatalf("joint ConfState = %+v", state)
+	}
+
+	cgoPersistAndAdvance(t, rn, storage, rd)
+	if !rn.HasReady() {
+		t.Fatal("Advance did not propose automatic joint exit")
+	}
+	leaveReady := rn.Ready()
+	var leave *pb.Entry
+	for _, entry := range leaveReady.Entries {
+		if entry.GetType() == pb.EntryConfChangeV2 {
+			leave = entry
+		}
+	}
+	if leave == nil {
+		t.Fatalf("automatic leave entries = %+v", leaveReady.Entries)
+	}
+	if leave.Data != nil {
+		t.Fatalf("automatic leave data = %v, want nil", leave.Data)
+	}
+}
+
+func TestCGoRawNodeLeaderRemoval(t *testing.T) {
+	for _, stepDown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "remain-leader", true: "step-down"}[stepDown], func(t *testing.T) {
+			cfg := cgoSkeletonConfig()
+			cfg.StepDownOnRemoval = stepDown
+			storage := cfg.Storage.(*MemoryStorage)
+			rn, err := NewRawNode(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rn.destroy()
+			if err := rn.Bootstrap([]Peer{{ID: 1}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := rn.Campaign(); err != nil {
+				t.Fatal(err)
+			}
+			cgoPersistAndAdvance(t, rn, storage, rn.Ready())
+
+			rn.ApplyConfChange(&pb.ConfChange{
+				Type:   pb.ConfChangeAddNode.Enum(),
+				NodeId: new(uint64(2)),
+			})
+			state := rn.ApplyConfChange(&pb.ConfChange{
+				Type:   pb.ConfChangeRemoveNode.Enum(),
+				NodeId: new(uint64(1)),
+			})
+			if !reflect.DeepEqual(state.Voters, []uint64{2}) ||
+				rn.HasProgress(1) {
+				t.Fatalf("leader removal ConfState = %+v", state)
+			}
+			wantState := StateLeader
+			if stepDown {
+				wantState = StateFollower
+			}
+			if got := rn.BasicStatus().RaftState; got != wantState {
+				t.Fatalf("state after removal = %v, want %v", got, wantState)
+			}
+			if err := rn.Propose([]byte("removed")); !errors.Is(err, ErrProposalDropped) {
+				t.Fatalf("removed leader proposal = %v, want dropped", err)
+			}
+		})
+	}
+}
+
+func TestCGoRawNodeRestoresJointConfState(t *testing.T) {
+	storage := NewMemoryStorage()
+	if err := storage.ApplySnapshot(&pb.Snapshot{
+		Metadata: &pb.SnapshotMetadata{
+			Index: new(uint64(5)),
+			Term:  new(uint64(2)),
+			ConfState: &pb.ConfState{
+				Voters:         []uint64{1, 2},
+				VotersOutgoing: []uint64{1, 3},
+				Learners:       []uint64{4},
+				LearnersNext:   []uint64{3},
+				AutoLeave:      new(true),
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, state, err := storage.InitialState(); err != nil {
+		t.Fatal(err)
+	} else if !reflect.DeepEqual(state.Voters, []uint64{1, 2}) {
+		t.Fatalf("storage ConfState = %+v", state)
+	}
+	cfg := cgoSkeletonConfig()
+	cfg.Storage = storage
+	cfg.Applied = 5
+	rn, err := NewRawNode(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rn.destroy()
+
+	status := rn.Status()
+	_, in1 := status.Config.Voters[0][1]
+	_, in2 := status.Config.Voters[0][2]
+	_, out1 := status.Config.Voters[1][1]
+	_, out3 := status.Config.Voters[1][3]
+	if len(status.Config.Voters[0]) != 2 || !in1 || !in2 ||
+		len(status.Config.Voters[1]) != 2 || !out1 || !out3 ||
+		!status.Config.AutoLeave {
+		t.Fatalf("restored config = %+v", status.Config)
+	}
+	for _, id := range []uint64{1, 2, 3, 4} {
+		if !rn.HasProgress(id) {
+			t.Fatalf("missing restored progress for %d", id)
+		}
+	}
+	var types = map[uint64]ProgressType{}
+	rn.WithProgress(func(id uint64, typ ProgressType, _ tracker.Progress) {
+		types[id] = typ
+	})
+	if types[1] != ProgressTypePeer ||
+		types[2] != ProgressTypePeer ||
+		types[3] != ProgressTypePeer ||
+		types[4] != ProgressTypeLearner {
+		t.Fatalf("restored progress types = %+v", types)
 	}
 }

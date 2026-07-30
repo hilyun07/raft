@@ -289,66 +289,13 @@ static int core_send(raft_t *raft, raft_message_t *message) {
     return core_message_vec_push(&raft->messages, message);
 }
 
-static int core_progress_compare(const void *left, const void *right) {
-    const raft_basic_progress_internal_t *a = left;
-    const raft_basic_progress_internal_t *b = right;
-    if (a->id < b->id) {
-        return -1;
-    }
-    if (a->id > b->id) {
-        return 1;
-    }
-    return 0;
-}
-
-static raft_basic_progress_internal_t *core_find_progress(
+static raft_progress_internal_t *core_find_progress(
     raft_t *raft, uint64_t id) {
-    size_t i;
-    if (raft == NULL) {
-        return NULL;
-    }
-    for (i = 0; i < raft->progress_len; ++i) {
-        if (raft->progress[i].id == id) {
-            return &raft->progress[i];
-        }
-    }
-    return NULL;
-}
-
-static const raft_basic_progress_internal_t *core_find_progress_const(
-    const raft_t *raft, uint64_t id) {
-    size_t i;
-    if (raft == NULL) {
-        return NULL;
-    }
-    for (i = 0; i < raft->progress_len; ++i) {
-        if (raft->progress[i].id == id) {
-            return &raft->progress[i];
-        }
-    }
-    return NULL;
-}
-
-static size_t core_voter_count(const raft_t *raft) {
-    size_t count = 0;
-    size_t i;
-    for (i = 0; i < raft->progress_len; ++i) {
-        if (!raft->progress[i].is_learner) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-static size_t core_quorum(const raft_t *raft) {
-    size_t voters = core_voter_count(raft);
-    return voters / 2 + 1;
+    return raft == NULL ? NULL : raft_tracker_find(&raft->tracker, id);
 }
 
 static bool core_is_voter(const raft_t *raft, uint64_t id) {
-    const raft_basic_progress_internal_t *progress =
-        core_find_progress_const(raft, id);
-    return progress != NULL && !progress->is_learner;
+    return raft != NULL && raft_tracker_is_voter(&raft->tracker, id);
 }
 
 static bool core_promotable(const raft_t *raft) {
@@ -358,84 +305,18 @@ static bool core_promotable(const raft_t *raft) {
 
 static int core_set_configuration(raft_t *raft,
                                   const raft_conf_state_t *state) {
-    raft_conf_state_t copied;
-    raft_basic_progress_internal_t *progress = NULL;
     uint64_t last_index;
-    size_t count;
-    size_t i;
-    size_t j;
     int result;
 
-    if (raft == NULL || state == NULL ||
-        !core_array_valid(state->voters.items, state->voters.len) ||
-        !core_array_valid(state->voters_outgoing.items,
-                          state->voters_outgoing.len) ||
-        !core_array_valid(state->learners.items, state->learners.len) ||
-        !core_array_valid(state->learners_next.items,
-                          state->learners_next.len)) {
+    if (raft == NULL || state == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    if (state->voters_outgoing.len != 0 ||
-        state->learners_next.len != 0 || state->auto_leave) {
-        return RAFT_ERR_NOT_IMPLEMENTED;
-    }
-    if (state->voters.len > SIZE_MAX - state->learners.len) {
-        return RAFT_ERR_OUT_OF_MEMORY;
-    }
-    count = state->voters.len + state->learners.len;
     result = raft_log_last_index(raft->log, &last_index);
     if (result != RAFT_OK) {
         return result;
     }
-    if (last_index == UINT64_MAX) {
-        return RAFT_ERR_FATAL;
-    }
-    memset(&copied, 0, sizeof(copied));
-    result = core_conf_state_copy(&copied, state);
-    if (result != RAFT_OK) {
-        return result;
-    }
-    if (count != 0) {
-        if (count > SIZE_MAX / sizeof(*progress)) {
-            raft_conf_state_free(&copied);
-            return RAFT_ERR_OUT_OF_MEMORY;
-        }
-        progress = calloc(count, sizeof(*progress));
-        if (progress == NULL) {
-            raft_conf_state_free(&copied);
-            return RAFT_ERR_OUT_OF_MEMORY;
-        }
-    }
-    for (i = 0; i < count; ++i) {
-        uint64_t id = i < state->voters.len
-                          ? state->voters.items[i]
-                          : state->learners.items[i - state->voters.len];
-        if (!raft_is_valid_node_id(id)) {
-            free(progress);
-            raft_conf_state_free(&copied);
-            return RAFT_ERR_FATAL;
-        }
-        for (j = 0; j < i; ++j) {
-            if (progress[j].id == id) {
-                free(progress);
-                raft_conf_state_free(&copied);
-                return RAFT_ERR_FATAL;
-            }
-        }
-        progress[i].id = id;
-        progress[i].next_index = last_index + 1;
-        progress[i].state = RAFT_PROGRESS_STATE_PROBE;
-        progress[i].is_learner = i >= state->voters.len;
-    }
-    if (count > 1) {
-        qsort(progress, count, sizeof(*progress), core_progress_compare);
-    }
-    free(raft->progress);
-    raft_conf_state_free(&raft->conf_state);
-    raft->progress = progress;
-    raft->progress_len = count;
-    raft->conf_state = copied;
-    return RAFT_OK;
+    return raft_confchange_restore(
+        &raft->tracker, state, last_index);
 }
 
 static int core_reset(raft_t *raft, uint64_t term) {
@@ -460,16 +341,15 @@ static int core_reset(raft_t *raft, uint64_t term) {
     if (last_index == UINT64_MAX) {
         return RAFT_ERR_FATAL;
     }
-    for (i = 0; i < raft->progress_len; ++i) {
-        raft_basic_progress_internal_t *progress = &raft->progress[i];
+    raft_tracker_reset_votes(&raft->tracker);
+    for (i = 0; i < raft->tracker.progress_len; ++i) {
+        raft_progress_internal_t *progress =
+            &raft->tracker.progress[i];
         progress->match_index = 0;
         progress->next_index = last_index + 1;
-        progress->state = RAFT_PROGRESS_STATE_PROBE;
-        progress->pending_snapshot = 0;
+        raft_progress_reset_state(
+            progress, RAFT_PROGRESS_STATE_PROBE);
         progress->recent_active = progress->id == raft->id;
-        progress->message_flow_paused = false;
-        progress->vote_recorded = false;
-        progress->vote_granted = false;
     }
     return RAFT_OK;
 }
@@ -487,7 +367,7 @@ static int core_become_follower(raft_t *raft,
 }
 
 static int core_become_candidate(raft_t *raft) {
-    raft_basic_progress_internal_t *self;
+    raft_progress_internal_t *self;
     int result;
 
     if (raft->state == RAFT_STATE_LEADER || raft->term == UINT64_MAX) {
@@ -503,8 +383,7 @@ static int core_become_candidate(raft_t *raft) {
     if (self == NULL || self->is_learner) {
         return RAFT_ERR_FATAL;
     }
-    self->vote_recorded = true;
-    self->vote_granted = true;
+    raft_tracker_record_vote(&raft->tracker, raft->id, true);
     return RAFT_OK;
 }
 
@@ -523,44 +402,22 @@ static uint64_t core_payload_size(const raft_entry_t *entries,
 }
 
 static int core_maybe_commit(raft_t *raft, bool *changed) {
-    uint64_t candidate = 0;
-    size_t quorum = core_quorum(raft);
-    size_t i;
-
     if (changed == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     *changed = false;
-    if (quorum == 0 || core_voter_count(raft) == 0) {
-        return RAFT_OK;
-    }
-    for (i = 0; i < raft->progress_len; ++i) {
-        size_t matched = 0;
-        size_t j;
-        uint64_t index;
-        if (raft->progress[i].is_learner) {
-            continue;
-        }
-        index = raft->progress[i].match_index;
-        for (j = 0; j < raft->progress_len; ++j) {
-            if (!raft->progress[j].is_learner &&
-                raft->progress[j].match_index >= index) {
-                ++matched;
-            }
-        }
-        if (matched >= quorum && index > candidate) {
-            candidate = index;
-        }
-    }
     return raft_log_maybe_commit(
-        raft->log, candidate, raft->term, changed);
+        raft->log,
+        raft_tracker_committed(&raft->tracker),
+        raft->term,
+        changed);
 }
 
 static int core_append_entries(raft_t *raft,
                                const raft_entry_view_t *entries,
                                size_t entry_count) {
     raft_entry_t *owned;
-    raft_basic_progress_internal_t *self;
+    raft_progress_internal_t *self;
     uint64_t last_index;
     uint64_t payload_size;
     size_t i;
@@ -626,7 +483,7 @@ static int core_append_noop(raft_t *raft) {
 }
 
 static int core_become_leader(raft_t *raft) {
-    raft_basic_progress_internal_t *self;
+    raft_progress_internal_t *self;
     uint64_t last_index;
     int result;
 
@@ -647,10 +504,9 @@ static int core_become_leader(raft_t *raft) {
     if (result != RAFT_OK) {
         return result;
     }
+    raft->pending_conf_index = last_index;
     self->match_index = last_index;
-    self->next_index =
-        last_index == UINT64_MAX ? UINT64_MAX : last_index + 1;
-    self->state = RAFT_PROGRESS_STATE_REPLICATE;
+    raft_progress_become_replicate(self);
     self->recent_active = true;
     return core_append_noop(raft);
 }
@@ -680,14 +536,20 @@ static int core_send_vote_request(raft_t *raft, uint64_t to) {
 }
 
 static int core_send_append(raft_t *raft,
-                            raft_basic_progress_internal_t *progress) {
+                            raft_progress_internal_t *progress) {
     raft_message_t message;
+    uint64_t entry_bytes = 0;
     uint64_t previous_index;
     uint64_t previous_term;
+    size_t entry_count;
+    size_t i;
     int result;
 
     if (progress == NULL || progress->id == raft->id) {
         return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    if (raft_progress_is_paused(progress)) {
+        return RAFT_OK;
     }
     if (progress->next_index == 0) {
         progress->next_index = 1;
@@ -702,27 +564,70 @@ static int core_send_append(raft_t *raft,
     message.index = previous_index;
     message.log_term = previous_term;
     message.commit = raft->log->committed;
-    result = raft_log_entries(raft->log,
-                              progress->next_index,
-                              raft->max_size_per_message,
-                              &message.entries);
-    if (result != RAFT_OK) {
-        raft_message_free(&message);
-        return result;
+    if (progress->state != RAFT_PROGRESS_STATE_REPLICATE ||
+        !raft_inflights_full(&progress->inflights)) {
+        result = raft_log_entries(raft->log,
+                                  progress->next_index,
+                                  raft->max_size_per_message,
+                                  &message.entries);
+        if (result != RAFT_OK) {
+            raft_message_free(&message);
+            return result;
+        }
     }
+    for (i = 0; i < message.entries.len; ++i) {
+        uint64_t size =
+            (uint64_t)message.entries.items[i].data.len;
+        entry_bytes = UINT64_MAX - entry_bytes < size
+                          ? UINT64_MAX
+                          : entry_bytes + size;
+    }
+    entry_count = message.entries.len;
     result = core_send(raft, &message);
+    if (result == RAFT_OK) {
+        result = raft_progress_sent_entries(
+            progress, entry_count, entry_bytes);
+    }
+    if (result == RAFT_OK) {
+        raft_progress_sent_commit(
+            progress, raft->log->committed);
+    }
     raft_message_free(&message);
     return result;
 }
 
+static int core_send_pending_entries(
+    raft_t *raft, raft_progress_internal_t *progress) {
+    uint64_t last_index;
+    int result;
+
+    result = raft_log_last_index(raft->log, &last_index);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    while (progress->next_index <= last_index &&
+           !raft_progress_is_paused(progress)) {
+        uint64_t previous_next = progress->next_index;
+        result = core_send_append(raft, progress);
+        if (result != RAFT_OK) {
+            return result;
+        }
+        if (progress->next_index == previous_next) {
+            break;
+        }
+    }
+    return RAFT_OK;
+}
+
 static int core_broadcast_append(raft_t *raft) {
     size_t i;
-    for (i = 0; i < raft->progress_len; ++i) {
+    for (i = 0; i < raft->tracker.progress_len; ++i) {
         int result;
-        if (raft->progress[i].id == raft->id) {
+        if (raft->tracker.progress[i].id == raft->id) {
             continue;
         }
-        result = core_send_append(raft, &raft->progress[i]);
+        result = core_send_append(
+            raft, &raft->tracker.progress[i]);
         if (result != RAFT_OK) {
             return result;
         }
@@ -731,7 +636,7 @@ static int core_broadcast_append(raft_t *raft) {
 }
 
 static int core_send_heartbeat(raft_t *raft,
-                               raft_basic_progress_internal_t *progress) {
+                               raft_progress_internal_t *progress) {
     raft_message_t message;
     int result;
 
@@ -743,18 +648,25 @@ static int core_send_heartbeat(raft_t *raft,
     message.commit =
         core_min_u64(progress->match_index, raft->log->committed);
     result = core_send(raft, &message);
+    if (result == RAFT_OK) {
+        raft_progress_sent_commit(
+            progress,
+            core_min_u64(
+                progress->match_index, raft->log->committed));
+    }
     raft_message_free(&message);
     return result;
 }
 
 static int core_broadcast_heartbeat(raft_t *raft) {
     size_t i;
-    for (i = 0; i < raft->progress_len; ++i) {
+    for (i = 0; i < raft->tracker.progress_len; ++i) {
         int result;
-        if (raft->progress[i].id == raft->id) {
+        if (raft->tracker.progress[i].id == raft->id) {
             continue;
         }
-        result = core_send_heartbeat(raft, &raft->progress[i]);
+        result = core_send_heartbeat(
+            raft, &raft->tracker.progress[i]);
         if (result != RAFT_OK) {
             return result;
         }
@@ -773,15 +685,19 @@ static int core_campaign_election(raft_t *raft) {
     if (result != RAFT_OK) {
         return result;
     }
-    if (core_quorum(raft) == 1) {
+    if (raft_tracker_vote_result(&raft->tracker) ==
+        RAFT_VOTE_WON) {
         return core_become_leader(raft);
     }
-    for (i = 0; i < raft->progress_len; ++i) {
-        if (raft->progress[i].is_learner ||
-            raft->progress[i].id == raft->id) {
+    for (i = 0; i < raft->tracker.progress_len; ++i) {
+        raft_progress_internal_t *progress =
+            &raft->tracker.progress[i];
+        if (!raft_tracker_is_voter(
+                &raft->tracker, progress->id) ||
+            progress->id == raft->id) {
             continue;
         }
-        result = core_send_vote_request(raft, raft->progress[i].id);
+        result = core_send_vote_request(raft, progress->id);
         if (result != RAFT_OK) {
             return result;
         }
@@ -824,41 +740,26 @@ static int core_handle_vote(raft_t *raft,
 
 static int core_handle_vote_response(raft_t *raft,
                                      const raft_message_view_t *message) {
-    raft_basic_progress_internal_t *progress =
+    raft_progress_internal_t *progress =
         core_find_progress(raft, message->from);
-    size_t granted = 0;
-    size_t rejected = 0;
-    size_t quorum = core_quorum(raft);
-    size_t i;
+    raft_vote_result_internal_t vote_result;
     int result;
 
     if (raft->state != RAFT_STATE_CANDIDATE || progress == NULL ||
         progress->is_learner) {
         return RAFT_OK;
     }
-    if (!progress->vote_recorded) {
-        progress->vote_recorded = true;
-        progress->vote_granted = !message->reject;
-    }
-    for (i = 0; i < raft->progress_len; ++i) {
-        if (raft->progress[i].is_learner ||
-            !raft->progress[i].vote_recorded) {
-            continue;
-        }
-        if (raft->progress[i].vote_granted) {
-            ++granted;
-        } else {
-            ++rejected;
-        }
-    }
-    if (granted >= quorum) {
+    raft_tracker_record_vote(
+        &raft->tracker, message->from, !message->reject);
+    vote_result = raft_tracker_vote_result(&raft->tracker);
+    if (vote_result == RAFT_VOTE_WON) {
         result = core_become_leader(raft);
         if (result != RAFT_OK) {
             return result;
         }
         return core_broadcast_append(raft);
     }
-    if (rejected >= quorum) {
+    if (vote_result == RAFT_VOTE_LOST) {
         return core_become_follower(raft, raft->term, RAFT_NONE);
     }
     return RAFT_OK;
@@ -1069,12 +970,86 @@ static int core_step_candidate(raft_t *raft,
     }
 }
 
+static int core_prepare_proposal_entries(
+    raft_t *raft,
+    const raft_entry_view_vec_t *source,
+    raft_entry_view_t **out) {
+    raft_entry_view_t *entries;
+    uint64_t last_index;
+    size_t i;
+    int result;
+
+    if (raft == NULL || source == NULL || out == NULL ||
+        !core_array_valid(source->items, source->len)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+    if (source->len == 0 ||
+        source->len > SIZE_MAX / sizeof(*entries)) {
+        return source->len == 0 ? RAFT_ERR_PROPOSAL_DROPPED
+                                : RAFT_ERR_OUT_OF_MEMORY;
+    }
+    result = raft_log_last_index(raft->log, &last_index);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    entries = calloc(source->len, sizeof(*entries));
+    if (entries == NULL) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    memcpy(entries,
+           source->items,
+           source->len * sizeof(*entries));
+    for (i = 0; i < source->len; ++i) {
+        raft_decoded_conf_change_t decoded;
+        bool already_pending;
+        bool already_joint;
+        bool wants_leave;
+
+        if (entries[i].type != RAFT_ENTRY_CONF_CHANGE &&
+            entries[i].type != RAFT_ENTRY_CONF_CHANGE_V2) {
+            continue;
+        }
+        memset(&decoded, 0, sizeof(decoded));
+        result = raft_confchange_decode_entry(
+            entries[i].type, &entries[i].data, &decoded);
+        if (result != RAFT_OK) {
+            free(entries);
+            return RAFT_ERR_FATAL;
+        }
+        already_pending =
+            raft->pending_conf_index > raft->log->applied;
+        already_joint = raft_tracker_is_joint(&raft->tracker);
+        wants_leave = raft_confchange_is_leave_joint(&decoded);
+        if (!raft->disable_conf_change_validation &&
+            (already_pending ||
+             (already_joint && !wants_leave) ||
+             (!already_joint && wants_leave))) {
+            entries[i].type = RAFT_ENTRY_NORMAL;
+            entries[i].data =
+                (raft_byte_view_t){NULL, 0, true};
+        } else {
+            if (last_index == UINT64_MAX ||
+                (uint64_t)i >= UINT64_MAX - last_index) {
+                raft_decoded_conf_change_free(&decoded);
+                free(entries);
+                return RAFT_ERR_FATAL;
+            }
+            raft->pending_conf_index =
+                last_index + (uint64_t)i + 1;
+        }
+        raft_decoded_conf_change_free(&decoded);
+    }
+    *out = entries;
+    return RAFT_OK;
+}
+
 static int core_handle_append_response(
     raft_t *raft, const raft_message_view_t *message) {
-    raft_basic_progress_internal_t *progress =
+    raft_progress_internal_t *progress =
         core_find_progress(raft, message->from);
-    uint64_t last_index;
     bool committed;
+    bool updated;
     int result;
 
     if (progress == NULL) {
@@ -1082,30 +1057,33 @@ static int core_handle_append_response(
     }
     progress->recent_active = true;
     if (message->reject) {
-        uint64_t next = message->reject_hint == UINT64_MAX
-                            ? UINT64_MAX
-                            : message->reject_hint + 1;
-        if (next >= progress->next_index && progress->next_index > 1) {
-            next = progress->next_index - 1;
+        if (!raft_progress_maybe_decr_to(
+                progress,
+                message->index,
+                message->reject_hint)) {
+            return RAFT_OK;
         }
-        if (next <= progress->match_index) {
-            next = progress->match_index == UINT64_MAX
-                       ? UINT64_MAX
-                       : progress->match_index + 1;
+        if (progress->state == RAFT_PROGRESS_STATE_REPLICATE) {
+            raft_progress_become_probe(progress);
         }
-        if (next == 0) {
-            next = 1;
-        }
-        progress->next_index = next;
-        progress->state = RAFT_PROGRESS_STATE_PROBE;
         return core_send_append(raft, progress);
     }
-    if (message->index > progress->match_index) {
-        progress->match_index = message->index;
-        progress->next_index =
-            message->index == UINT64_MAX ? UINT64_MAX
-                                         : message->index + 1;
-        progress->state = RAFT_PROGRESS_STATE_REPLICATE;
+    updated = raft_progress_maybe_update(
+        progress, message->index);
+    if (updated ||
+        (progress->match_index == message->index &&
+         progress->state == RAFT_PROGRESS_STATE_PROBE)) {
+        if (progress->state == RAFT_PROGRESS_STATE_PROBE) {
+            raft_progress_become_replicate(progress);
+        } else if (progress->state ==
+                   RAFT_PROGRESS_STATE_SNAPSHOT) {
+            raft_progress_become_probe(progress);
+            raft_progress_become_replicate(progress);
+        } else if (progress->state ==
+                   RAFT_PROGRESS_STATE_REPLICATE) {
+            raft_inflights_free_le(
+                &progress->inflights, message->index);
+        }
     }
     result = core_maybe_commit(raft, &committed);
     if (result != RAFT_OK) {
@@ -1114,14 +1092,14 @@ static int core_handle_append_response(
     if (committed) {
         return core_broadcast_append(raft);
     }
-    result = raft_log_last_index(raft->log, &last_index);
-    if (result != RAFT_OK) {
-        return result;
+    if (raft_progress_can_bump_commit(
+            progress, raft->log->committed)) {
+        result = core_send_append(raft, progress);
+        if (result != RAFT_OK) {
+            return result;
+        }
     }
-    if (progress->match_index < last_index) {
-        return core_send_append(raft, progress);
-    }
-    return RAFT_OK;
+    return core_send_pending_entries(raft, progress);
 }
 
 static int core_step_leader(raft_t *raft,
@@ -1130,8 +1108,19 @@ static int core_step_leader(raft_t *raft,
         case RAFT_MSG_BEAT:
             return core_broadcast_heartbeat(raft);
         case RAFT_MSG_PROP: {
-            int result = core_append_entries(
-                raft, message->entries.items, message->entries.len);
+            raft_entry_view_t *entries = NULL;
+            int result;
+            if (!core_is_voter(raft, raft->id) ||
+                raft->lead_transferee != RAFT_NONE) {
+                return RAFT_ERR_PROPOSAL_DROPPED;
+            }
+            result = core_prepare_proposal_entries(
+                raft, &message->entries, &entries);
+            if (result == RAFT_OK) {
+                result = core_append_entries(
+                    raft, entries, message->entries.len);
+            }
+            free(entries);
             if (result != RAFT_OK) {
                 return result;
             }
@@ -1140,7 +1129,7 @@ static int core_step_leader(raft_t *raft,
         case RAFT_MSG_APP_RESP:
             return core_handle_append_response(raft, message);
         case RAFT_MSG_HEARTBEAT_RESP: {
-            raft_basic_progress_internal_t *progress =
+            raft_progress_internal_t *progress =
                 core_find_progress(raft, message->from);
             uint64_t last_index;
             int result;
@@ -1148,6 +1137,7 @@ static int core_step_leader(raft_t *raft,
                 return RAFT_OK;
             }
             progress->recent_active = true;
+            progress->message_flow_paused = false;
             result = raft_log_last_index(raft->log, &last_index);
             if (result != RAFT_OK) {
                 return result;
@@ -1179,6 +1169,12 @@ int raft_core_init(raft_t *raft,
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     memset(raft, 0, sizeof(*raft));
+    result = raft_tracker_init(&raft->tracker,
+                               config->max_inflight_messages,
+                               config->max_inflight_bytes);
+    if (result != RAFT_OK) {
+        return result;
+    }
     raft->id = config->id;
     raft->log = log;
     raft->election_timeout = config->election_tick;
@@ -1189,6 +1185,9 @@ int raft_core_init(raft_t *raft,
         config->max_uncommitted_entries_size;
     raft->disable_proposal_forwarding =
         config->disable_proposal_forwarding;
+    raft->disable_conf_change_validation =
+        config->disable_conf_change_validation;
+    raft->step_down_on_removal = config->step_down_on_removal;
     raft->lead = RAFT_NONE;
     raft->vote = RAFT_NONE;
     raft->lead_transferee = RAFT_NONE;
@@ -1248,8 +1247,7 @@ void raft_core_free(raft_t *raft) {
     if (raft == NULL) {
         return;
     }
-    raft_conf_state_free(&raft->conf_state);
-    free(raft->progress);
+    raft_tracker_free(&raft->tracker);
     raft_message_vec_free(&raft->messages);
     memset(raft, 0, sizeof(*raft));
 }
@@ -1333,7 +1331,7 @@ int raft_core_bootstrap(raft_t *raft,
         peer_count > SIZE_MAX / sizeof(*entries)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    if (raft->progress_len != 0) {
+    if (raft->tracker.progress_len != 0) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     result = raft->log->storage.last_index(
@@ -1443,47 +1441,167 @@ int raft_core_campaign(raft_t *raft) {
     return core_campaign_election(raft);
 }
 
-int raft_core_propose(raft_t *raft, const raft_byte_view_t *data) {
+static int core_propose_entry(raft_t *raft,
+                              raft_entry_type_t type,
+                              const raft_byte_view_t *data) {
     raft_entry_view_t entry;
-    int result;
+    raft_message_view_t message;
 
     if (raft == NULL || !raft_byte_view_valid(data)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    if (raft->error != RAFT_OK) {
-        return raft->error;
-    }
     memset(&entry, 0, sizeof(entry));
-    entry.type = RAFT_ENTRY_NORMAL;
+    entry.type = type;
     entry.data = *data;
-    if (raft->state == RAFT_STATE_LEADER) {
-        result = core_append_entries(raft, &entry, 1);
-        if (result != RAFT_OK) {
-            return result;
-        }
-        return core_broadcast_append(raft);
+    memset(&message, 0, sizeof(message));
+    message.type = RAFT_MSG_PROP;
+    message.from = raft->id;
+    message.entries.items = &entry;
+    message.entries.len = 1;
+    return raft_core_step(raft, &message);
+}
+
+int raft_core_propose(raft_t *raft, const raft_byte_view_t *data) {
+    return core_propose_entry(raft, RAFT_ENTRY_NORMAL, data);
+}
+
+int raft_core_propose_conf_change_v1(
+    raft_t *raft, const raft_conf_change_view_t *change) {
+    raft_bytes_t encoded;
+    raft_byte_view_t view;
+    int result;
+
+    if (raft == NULL || change == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
     }
-    if (raft->state == RAFT_STATE_FOLLOWER &&
-        raft->lead != RAFT_NONE &&
-        !raft->disable_proposal_forwarding) {
-        raft_message_t message;
-        core_message_init(&message, RAFT_MSG_PROP);
-        message.to = raft->lead;
-        message.from = raft->id;
-        message.entries.items = calloc(1, sizeof(*message.entries.items));
-        if (message.entries.items == NULL) {
-            return RAFT_ERR_OUT_OF_MEMORY;
-        }
-        message.entries.len = 1;
-        result = raft_entry_copy_from_view(
-            &message.entries.items[0], &entry);
-        if (result == RAFT_OK) {
-            result = core_send(raft, &message);
-        }
-        raft_message_free(&message);
+    memset(&encoded, 0, sizeof(encoded));
+    result = raft_confchange_encode_v1(change, &encoded);
+    if (result != RAFT_OK) {
         return result;
     }
-    return RAFT_ERR_PROPOSAL_DROPPED;
+    view = (raft_byte_view_t){
+        .data = encoded.data,
+        .len = encoded.len,
+        .is_nil = encoded.is_nil,
+    };
+    result = core_propose_entry(
+        raft, RAFT_ENTRY_CONF_CHANGE, &view);
+    raft_bytes_free(&encoded);
+    return result;
+}
+
+int raft_core_propose_conf_change_v2(
+    raft_t *raft, const raft_conf_change_v2_view_t *change) {
+    raft_bytes_t encoded;
+    raft_byte_view_t view;
+    int result;
+
+    if (raft == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    if (change == NULL) {
+        view = (raft_byte_view_t){NULL, 0, true};
+        return core_propose_entry(
+            raft, RAFT_ENTRY_CONF_CHANGE_V2, &view);
+    }
+    memset(&encoded, 0, sizeof(encoded));
+    result = raft_confchange_encode_v2(change, &encoded);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    view = (raft_byte_view_t){
+        .data = encoded.data,
+        .len = encoded.len,
+        .is_nil = encoded.is_nil,
+    };
+    result = core_propose_entry(
+        raft, RAFT_ENTRY_CONF_CHANGE_V2, &view);
+    raft_bytes_free(&encoded);
+    return result;
+}
+
+int raft_core_apply_conf_change(
+    raft_t *raft,
+    const raft_conf_change_v2_view_t *change,
+    raft_conf_state_t *out) {
+    raft_progress_internal_t *self;
+    uint64_t last_index;
+    bool committed;
+    size_t i;
+    int result;
+
+    if (raft == NULL || change == NULL || out == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    memset(out, 0, sizeof(*out));
+    result = raft_log_last_index(raft->log, &last_index);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    result = raft_confchange_apply_view(
+        &raft->tracker, change, last_index);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    result = raft_tracker_conf_state_copy(&raft->tracker, out);
+    if (result != RAFT_OK) {
+        return result;
+    }
+
+    self = core_find_progress(raft, raft->id);
+    if (raft->state == RAFT_STATE_LEADER &&
+        (self == NULL || self->is_learner)) {
+        if (raft->step_down_on_removal) {
+            result = core_become_follower(
+                raft, raft->term, RAFT_NONE);
+        }
+        return result;
+    }
+    if (raft->state != RAFT_STATE_LEADER ||
+        raft->tracker.config.voters.len == 0) {
+        return RAFT_OK;
+    }
+
+    result = core_maybe_commit(raft, &committed);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    if (committed) {
+        result = core_broadcast_append(raft);
+    } else {
+        for (i = 0;
+             result == RAFT_OK &&
+             i < raft->tracker.progress_len;
+             ++i) {
+            raft_progress_internal_t *progress =
+                &raft->tracker.progress[i];
+            if (progress->id != raft->id) {
+                result = core_send_append(raft, progress);
+            }
+        }
+    }
+    if (result == RAFT_OK &&
+        raft->lead_transferee != RAFT_NONE &&
+        !raft_tracker_is_voter(
+            &raft->tracker, raft->lead_transferee)) {
+        raft->lead_transferee = RAFT_NONE;
+    }
+    return result;
+}
+
+int raft_core_maybe_auto_leave(raft_t *raft, uint64_t applied) {
+    int result;
+
+    if (raft == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    if (!raft->tracker.config.auto_leave ||
+        applied < raft->pending_conf_index ||
+        raft->state != RAFT_STATE_LEADER) {
+        return RAFT_OK;
+    }
+    result = raft_core_propose_conf_change_v2(raft, NULL);
+    return result == RAFT_ERR_PROPOSAL_DROPPED ? RAFT_OK : result;
 }
 
 int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
@@ -1569,54 +1687,25 @@ void raft_core_soft_state(const raft_t *raft, raft_soft_state_t *state) {
 }
 
 bool raft_core_has_progress(const raft_t *raft, uint64_t id) {
-    return core_find_progress_const(raft, id) != NULL;
+    return raft != NULL &&
+           raft_tracker_has_progress(&raft->tracker, id);
 }
 
 int raft_core_progress_snapshot(const raft_t *raft,
                                 raft_progress_snapshot_t **out,
                                 size_t *out_len) {
-    raft_progress_snapshot_t *snapshots;
-    size_t i;
-
     if (raft == NULL || out == NULL || out_len == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    *out = NULL;
-    *out_len = 0;
-    if (raft->progress_len == 0) {
-        return RAFT_OK;
-    }
-    if (raft->progress_len > SIZE_MAX / sizeof(*snapshots)) {
-        return RAFT_ERR_OUT_OF_MEMORY;
-    }
-    snapshots = calloc(raft->progress_len, sizeof(*snapshots));
-    if (snapshots == NULL) {
-        return RAFT_ERR_OUT_OF_MEMORY;
-    }
-    for (i = 0; i < raft->progress_len; ++i) {
-        const raft_basic_progress_internal_t *src = &raft->progress[i];
-        raft_progress_snapshot_t *dst = &snapshots[i];
-        dst->id = src->id;
-        dst->type =
-            src->is_learner ? RAFT_PROGRESS_LEARNER : RAFT_PROGRESS_PEER;
-        dst->progress.match_index = src->match_index;
-        dst->progress.next_index = src->next_index;
-        dst->progress.state = src->state;
-        dst->progress.pending_snapshot = src->pending_snapshot;
-        dst->progress.recent_active = src->recent_active;
-        dst->progress.message_flow_paused = src->message_flow_paused;
-        dst->progress.is_learner = src->is_learner;
-    }
-    *out = snapshots;
-    *out_len = raft->progress_len;
-    return RAFT_OK;
+    return raft_tracker_progress_snapshot(
+        &raft->tracker, out, out_len);
 }
 
 int raft_core_conf_state_copy(const raft_t *raft, raft_conf_state_t *out) {
     if (raft == NULL || out == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    return core_conf_state_copy(out, &raft->conf_state);
+    return raft_tracker_conf_state_copy(&raft->tracker, out);
 }
 
 int raft_core_ready_messages_copy(const raft_t *raft,

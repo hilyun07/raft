@@ -58,8 +58,9 @@ const (
 )
 
 // NewRawNode instantiates the opt-in C-backed RawNode. The C core implements
-// the Phase 7 election/replication subset; advanced raft features remain
-// explicit unsupported operations.
+// election, replication, progress tracking, quorum calculation, and
+// membership changes; remaining advanced features stay explicit unsupported
+// operations.
 func NewRawNode(config *Config) (*RawNode, error) {
 	return newRawNode(config, nil)
 }
@@ -217,8 +218,20 @@ func (rn *RawNode) ProposeConfChange(cc pb.ConfChangeI) error {
 	if err := rn.ensureOpen(); err != nil {
 		return err
 	}
+	if cc == nil {
+		return decodeCError(C.raft_raw_node_propose_conf_change(rn.p, nil))
+	}
 	var arena cInputArena
 	defer arena.free()
+	if legacy, ok := cc.AsV1(); ok {
+		view, err := makeConfChangeV1View(&arena, legacy)
+		if err != nil {
+			return err
+		}
+		rc := C.raft_raw_node_propose_conf_change_v1(rn.p, view)
+		keepAlive(cc)
+		return decodeCError(rc)
+	}
 	view, err := makeConfChangeV2View(&arena, cc)
 	if err != nil {
 		return err
@@ -482,7 +495,7 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 	rows := unsafe.Slice((*C.raft_peer_view_t)(p), len(peers))
 	for i := range peers {
 		rows[i].id = C.uint64_t(peers[i].ID)
-		setByteView(&rows[i].context, peers[i].Context)
+		arena.setByteView(&rows[i].context, peers[i].Context)
 	}
 	rc := C.raft_raw_node_bootstrap(rn.p, (*C.raft_peer_view_t)(p), C.size_t(len(rows)))
 	keepAlive(peers)

@@ -22,6 +22,8 @@
 // only for the opt-in cgo binding build.
 #include "unstable.c"
 #include "log.c"
+#include "tracker.c"
+#include "confchange.c"
 #include "raft_core.c"
 #include "raw_node.c"
 

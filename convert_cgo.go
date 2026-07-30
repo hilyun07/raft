@@ -39,6 +39,7 @@ import (
 // the wrapper until the single semantic C call returns.
 type cInputArena struct {
 	allocations []unsafe.Pointer
+	pinner      runtime.Pinner
 }
 
 func (a *cInputArena) alloc(count, size uintptr) (unsafe.Pointer, error) {
@@ -61,6 +62,7 @@ func (a *cInputArena) free() {
 		C.free(a.allocations[i])
 	}
 	a.allocations = nil
+	a.pinner.Unpin()
 }
 
 func cBool(v bool) C.bool {
@@ -74,53 +76,59 @@ func borrowedBytes(b []byte) *C.uint8_t {
 	return (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(b)))
 }
 
-func setByteView(dst *C.raft_byte_view_t, src []byte) {
-	dst.data = borrowedBytes(src)
+func (a *cInputArena) setByteView(dst *C.raft_byte_view_t, src []byte) {
+	if len(src) != 0 {
+		data := unsafe.SliceData(src)
+		a.pinner.Pin(data)
+		dst.data = (*C.uint8_t)(unsafe.Pointer(data))
+	}
 	dst.len = C.size_t(len(src))
 	dst.is_nil = cBool(src == nil)
 }
 
-func setUint64View(dst *C.raft_uint64_view_t, src []uint64) {
+func (a *cInputArena) setUint64View(dst *C.raft_uint64_view_t, src []uint64) {
 	if len(src) != 0 {
-		dst.items = (*C.uint64_t)(unsafe.Pointer(unsafe.SliceData(src)))
+		items := unsafe.SliceData(src)
+		a.pinner.Pin(items)
+		dst.items = (*C.uint64_t)(unsafe.Pointer(items))
 	}
 	dst.len = C.size_t(len(src))
 }
 
-func fillConfStateView(dst *C.raft_conf_state_view_t, src *pb.ConfState) {
+func (a *cInputArena) fillConfStateView(dst *C.raft_conf_state_view_t, src *pb.ConfState) {
 	if src == nil {
 		return
 	}
-	setUint64View(&dst.voters, src.Voters)
-	setUint64View(&dst.voters_outgoing, src.VotersOutgoing)
-	setUint64View(&dst.learners, src.Learners)
-	setUint64View(&dst.learners_next, src.LearnersNext)
+	a.setUint64View(&dst.voters, src.Voters)
+	a.setUint64View(&dst.voters_outgoing, src.VotersOutgoing)
+	a.setUint64View(&dst.learners, src.Learners)
+	a.setUint64View(&dst.learners_next, src.LearnersNext)
 	dst.auto_leave = cBool(src.GetAutoLeave())
 }
 
-func fillSnapshotView(dst *C.raft_snapshot_view_t, src *pb.Snapshot) {
+func (a *cInputArena) fillSnapshotView(dst *C.raft_snapshot_view_t, src *pb.Snapshot) {
 	if src == nil {
 		return
 	}
-	setByteView(&dst.data, src.Data)
+	a.setByteView(&dst.data, src.Data)
 	metadata := src.GetMetadata()
 	if metadata == nil {
 		return
 	}
 	dst.metadata.index = C.uint64_t(metadata.GetIndex())
 	dst.metadata.term = C.uint64_t(metadata.GetTerm())
-	fillConfStateView(&dst.metadata.conf_state, metadata.GetConfState())
+	a.fillConfStateView(&dst.metadata.conf_state, metadata.GetConfState())
 }
 
-func fillEntryView(dst *C.raft_entry_view_t, src *pb.Entry) {
+func (a *cInputArena) fillEntryView(dst *C.raft_entry_view_t, src *pb.Entry) {
 	if src == nil {
-		setByteView(&dst.data, nil)
+		a.setByteView(&dst.data, nil)
 		return
 	}
 	dst._type = C.raft_entry_type_t(src.GetType())
 	dst.term = C.uint64_t(src.GetTerm())
 	dst.index = C.uint64_t(src.GetIndex())
-	setByteView(&dst.data, src.Data)
+	a.setByteView(&dst.data, src.Data)
 }
 
 func makeMessageView(a *cInputArena, src *pb.Message) (*C.raft_message_view_t, error) {
@@ -130,7 +138,7 @@ func makeMessageView(a *cInputArena, src *pb.Message) (*C.raft_message_view_t, e
 	}
 	dst := (*C.raft_message_view_t)(p)
 	if src == nil {
-		setByteView(&dst.context, nil)
+		a.setByteView(&dst.context, nil)
 		return dst, nil
 	}
 
@@ -144,7 +152,7 @@ func makeMessageView(a *cInputArena, src *pb.Message) (*C.raft_message_view_t, e
 	dst.vote = C.uint64_t(src.GetVote())
 	dst.reject = cBool(src.GetReject())
 	dst.reject_hint = C.uint64_t(src.GetRejectHint())
-	setByteView(&dst.context, src.Context)
+	a.setByteView(&dst.context, src.Context)
 
 	if len(src.Entries) != 0 {
 		items, allocErr := a.alloc(
@@ -156,7 +164,7 @@ func makeMessageView(a *cInputArena, src *pb.Message) (*C.raft_message_view_t, e
 		}
 		entries := unsafe.Slice((*C.raft_entry_view_t)(items), len(src.Entries))
 		for i, entry := range src.Entries {
-			fillEntryView(&entries[i], entry)
+			a.fillEntryView(&entries[i], entry)
 		}
 		dst.entries.items = (*C.raft_entry_view_t)(items)
 		dst.entries.len = C.size_t(len(entries))
@@ -164,7 +172,7 @@ func makeMessageView(a *cInputArena, src *pb.Message) (*C.raft_message_view_t, e
 
 	if src.Snapshot != nil {
 		dst.has_snapshot = cBool(true)
-		fillSnapshotView(&dst.snapshot, src.Snapshot)
+		a.fillSnapshotView(&dst.snapshot, src.Snapshot)
 	}
 
 	if len(src.Responses) != 0 {
@@ -204,7 +212,8 @@ func makeConfChangeV2View(
 		src = cc.AsV2()
 	}
 	dst.transition = C.raft_conf_change_transition_t(src.GetTransition())
-	setByteView(&dst.context, src.Context)
+	dst.has_transition = cBool(src.Transition != nil)
+	a.setByteView(&dst.context, src.Context)
 	if len(src.Changes) == 0 {
 		return dst, nil
 	}
@@ -222,9 +231,33 @@ func makeConfChangeV2View(
 		}
 		changes[i]._type = C.raft_conf_change_type_t(change.GetType())
 		changes[i].node_id = C.uint64_t(change.GetNodeId())
+		changes[i].has_type = cBool(change.Type != nil)
+		changes[i].has_node_id = cBool(change.NodeId != nil)
 	}
 	dst.changes = (*C.raft_conf_change_single_t)(items)
 	dst.changes_len = C.size_t(len(changes))
+	return dst, nil
+}
+
+func makeConfChangeV1View(
+	a *cInputArena, src *pb.ConfChange,
+) (*C.raft_conf_change_view_t, error) {
+	p, err := a.alloc(1, unsafe.Sizeof(C.raft_conf_change_view_t{}))
+	if err != nil {
+		return nil, err
+	}
+	dst := (*C.raft_conf_change_view_t)(p)
+	if src == nil {
+		a.setByteView(&dst.context, nil)
+		return dst, nil
+	}
+	dst.id = C.uint64_t(src.GetId())
+	dst._type = C.raft_conf_change_type_t(src.GetType())
+	dst.node_id = C.uint64_t(src.GetNodeId())
+	dst.has_id = cBool(src.Id != nil)
+	dst.has_type = cBool(src.Type != nil)
+	dst.has_node_id = cBool(src.NodeId != nil)
+	a.setByteView(&dst.context, src.Context)
 	return dst, nil
 }
 
