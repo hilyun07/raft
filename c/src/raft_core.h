@@ -17,6 +17,7 @@
 
 #include "confchange.h"
 #include "log.h"
+#include "random.h"
 #include "read_only.h"
 
 typedef struct raft {
@@ -35,9 +36,10 @@ typedef struct raft {
 
     uint32_t election_timeout;
     uint32_t heartbeat_timeout;
-    uint32_t randomized_election_timeout;
-    uint32_t election_elapsed;
+    uint64_t randomized_election_timeout;
+    uint64_t election_elapsed;
     uint32_t heartbeat_elapsed;
+    raft_random_t random;
 
     uint64_t max_size_per_message;
     uint64_t max_uncommitted_entries_size;

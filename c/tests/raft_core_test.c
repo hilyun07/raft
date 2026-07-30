@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "raft/raft.h"
+#include "raft_internal.h"
 
 #include <assert.h>
 #include <stdlib.h>
@@ -334,6 +335,81 @@ static void test_initial_state_and_configuration(void) {
     raft_raw_node_destroy(node);
 }
 
+static void assert_randomized_timeout_in_range(
+    const raft_raw_node_t *node) {
+    uint64_t lower = node->raft.election_timeout;
+    uint64_t upper = lower * UINT64_C(2);
+
+    assert(node->raft.randomized_election_timeout >= lower);
+    assert(node->raft.randomized_election_timeout < upper);
+}
+
+static void test_randomized_election_timeout_lifecycle(void) {
+    const uint64_t voters[] = {1, 2, 3};
+    test_storage_t storage = {
+        .voters = voters,
+        .voter_count = 3,
+    };
+    raft_raw_node_t *node = new_node(1, &storage);
+    raft_message_view_t heartbeat = {
+        .type = RAFT_MSG_HEARTBEAT,
+        .to = 1,
+        .from = 2,
+        .context = {NULL, 0, true},
+    };
+    raft_basic_status_t status;
+    uint64_t initial_timeout;
+    uint64_t first_reset_timeout = 0;
+    uint64_t timeout;
+    uint64_t term;
+    bool observed_different_timeout = false;
+
+    assert_randomized_timeout_in_range(node);
+    initial_timeout = node->raft.randomized_election_timeout;
+    raft_raw_node_tick(node);
+    assert(node->raft.election_elapsed == 1);
+    assert(node->raft.randomized_election_timeout == initial_timeout);
+
+    heartbeat.term = 1;
+    assert(raft_raw_node_step(node, &heartbeat) == RAFT_OK);
+    timeout = node->raft.randomized_election_timeout;
+    assert_randomized_timeout_in_range(node);
+    assert(node->raft.election_elapsed == 0);
+
+    raft_raw_node_tick(node);
+    assert(node->raft.election_elapsed == 1);
+    assert(node->raft.randomized_election_timeout == timeout);
+    assert(raft_raw_node_step(node, &heartbeat) == RAFT_OK);
+    assert(node->raft.election_elapsed == 0);
+    assert(node->raft.randomized_election_timeout == timeout);
+
+    // A fixed private seed makes this reset sequence deterministic. The
+    // assertion is therefore not a probabilistic two-draw comparison.
+    raft_random_seed(
+        &node->raft.random, UINT64_C(0x4d595df4d0f33173));
+    for (term = 2; term < 34; ++term) {
+        heartbeat.term = term;
+        assert(raft_raw_node_step(node, &heartbeat) == RAFT_OK);
+        assert_randomized_timeout_in_range(node);
+        timeout = node->raft.randomized_election_timeout;
+        if (first_reset_timeout == 0) {
+            first_reset_timeout = timeout;
+        } else if (timeout != first_reset_timeout) {
+            observed_different_timeout = true;
+        }
+        raft_raw_node_tick(node);
+        assert(node->raft.randomized_election_timeout == timeout);
+    }
+    assert(observed_different_timeout);
+
+    // Campaigning enters candidate state through the same reset path.
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    assert_randomized_timeout_in_range(node);
+    assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
+    assert(status.soft_state.raft_state == RAFT_STATE_CANDIDATE);
+    raft_raw_node_destroy(node);
+}
+
 static void test_tick_starts_single_node_election(void) {
     const uint64_t voters[] = {1};
     test_storage_t storage = {
@@ -342,9 +418,11 @@ static void test_tick_starts_single_node_election(void) {
     };
     raft_raw_node_t *node = new_node(1, &storage);
     raft_basic_status_t status;
-    size_t i;
+    uint64_t timeout = node->raft.randomized_election_timeout;
+    uint64_t i;
 
-    for (i = 0; i < 9; ++i) {
+    assert_randomized_timeout_in_range(node);
+    for (i = 1; i < timeout; ++i) {
         raft_raw_node_tick(node);
     }
     assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
@@ -1354,6 +1432,7 @@ static void test_async_storage_write_protocol(void) {
 
 int main(void) {
     test_initial_state_and_configuration();
+    test_randomized_election_timeout_lifecycle();
     test_tick_starts_single_node_election();
     test_vote_grant_reject_and_higher_term_stepdown();
     test_append_heartbeat_and_follower_proposal();

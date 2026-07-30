@@ -18,7 +18,7 @@
 #include "raft_core.h"
 
 enum {
-    RAFT_RAW_NODE_ABI_VERSION = 15,
+    RAFT_RAW_NODE_ABI_VERSION = 16,
 };
 
 // The public header intentionally exposes only typedef struct raft_raw_node.

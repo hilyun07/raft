@@ -12,6 +12,7 @@ SANITIZER_CFLAGS ?= -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
 
 LIBRARY := $(BUILD_DIR)/libraft_c.a
 OBJECTS := \
+	$(BUILD_DIR)/random.o \
 	$(BUILD_DIR)/unstable.o \
 	$(BUILD_DIR)/log.o \
 	$(BUILD_DIR)/tracker.o \
@@ -35,6 +36,10 @@ all: $(LIBRARY)
 $(BUILD_DIR):
 	mkdir -p $@
 
+$(BUILD_DIR)/random.o: src/random.c src/random.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
+		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
+
 $(BUILD_DIR)/unstable.o: src/unstable.c src/unstable.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
@@ -55,11 +60,11 @@ $(BUILD_DIR)/read_only.o: src/read_only.c src/read_only.h src/tracker.h include/
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/raft_core.o: src/raft_core.c src/raft_core.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/raft_core.o: src/raft_core.c src/raft_core.h src/random.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/raw_node.o: src/raw_node.c src/raft_internal.h src/raft_core.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/raw_node.o: src/raw_node.c src/raft_internal.h src/raft_core.h src/random.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 

@@ -380,7 +380,10 @@ static int core_reset(raft_t *raft, uint64_t term) {
     raft->lead_transferee = RAFT_NONE;
     raft->election_elapsed = 0;
     raft->heartbeat_elapsed = 0;
-    raft->randomized_election_timeout = raft->election_timeout;
+    raft->randomized_election_timeout =
+        (uint64_t)raft->election_timeout +
+        (uint64_t)raft_random_uniform(
+            &raft->random, raft->election_timeout);
     raft->uncommitted_size = 0;
     raft_read_only_reset(&raft->read_only);
     result = raft_log_last_index(raft->log, &last_index);
@@ -2030,7 +2033,7 @@ int raft_core_init(raft_t *raft,
     raft->log = log;
     raft->election_timeout = config->election_tick;
     raft->heartbeat_timeout = config->heartbeat_tick;
-    raft->randomized_election_timeout = config->election_tick;
+    raft_random_init(&raft->random, config->id);
     raft->max_size_per_message = config->max_size_per_message;
     raft->max_uncommitted_entries_size =
         config->max_uncommitted_entries_size;
@@ -2315,7 +2318,7 @@ done:
 }
 
 void raft_core_tick_quiesced(raft_t *raft) {
-    if (raft != NULL && raft->election_elapsed != UINT32_MAX) {
+    if (raft != NULL && raft->election_elapsed != UINT64_MAX) {
         ++raft->election_elapsed;
     }
 }
