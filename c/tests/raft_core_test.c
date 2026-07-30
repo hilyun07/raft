@@ -1217,17 +1217,88 @@ static void test_uncommitted_proposal_limit(void) {
     raft_storage_ops_t ops = storage_ops(&storage);
     raft_config_t cfg = config(1);
     raft_raw_node_t *node = NULL;
-    const raft_byte_view_t too_large = {
-        .data = (const uint8_t *)"xx",
+    const raft_byte_view_t oversized = {
+        .data = (const uint8_t *)"large",
+        .len = 5,
+        .is_nil = false,
+    };
+    const raft_byte_view_t below_limit = {
+        .data = (const uint8_t *)"ok",
         .len = 2,
         .is_nil = false,
     };
+    const raft_byte_view_t one_byte = {
+        .data = (const uint8_t *)"x",
+        .len = 1,
+        .is_nil = false,
+    };
+    const raft_byte_view_t empty = {
+        .data = NULL,
+        .len = 0,
+        .is_nil = false,
+    };
+    raft_message_view_t append_response = {
+        .type = RAFT_MSG_APP_RESP,
+        .to = 1,
+        .from = 1,
+        .context = {NULL, 0, true},
+    };
+    size_t iterations;
 
-    cfg.max_uncommitted_entries_size = 1;
+    cfg.max_uncommitted_entries_size = 4;
     assert(raft_raw_node_new(&cfg, &ops, &node) == RAFT_OK);
     assert(raft_raw_node_campaign(node) == RAFT_OK);
-    assert(raft_raw_node_propose(node, &too_large) ==
+    iterations = 0;
+    while (raft_raw_node_has_ready(node)) {
+        assert(iterations++ < 8);
+        accept_and_advance(node, &storage);
+    }
+    assert(node->raft.uncommitted_size == 0);
+
+    // An empty uncommitted tail admits one proposal of any size.
+    assert(raft_raw_node_propose(node, &oversized) == RAFT_OK);
+    assert(node->raft.uncommitted_size == 5);
+    assert(raft_raw_node_propose(node, &oversized) ==
            RAFT_ERR_PROPOSAL_DROPPED);
+    assert(raft_raw_node_propose(node, &below_limit) ==
+           RAFT_ERR_PROPOSAL_DROPPED);
+    assert(node->raft.uncommitted_size == 5);
+
+    // Empty entries remain admissible and do not alter the accounting.
+    assert(raft_raw_node_propose(node, &empty) == RAFT_OK);
+    assert(node->raft.uncommitted_size == 5);
+
+    append_response.term = node->raft.term;
+    assert(raft_log_last_index(
+               &node->log, &append_response.index) == RAFT_OK);
+    assert(raft_raw_node_step(node, &append_response) == RAFT_OK);
+    iterations = 0;
+    while (raft_raw_node_has_ready(node)) {
+        assert(iterations++ < 8);
+        accept_and_advance(node, &storage);
+    }
+    assert(node->raft.uncommitted_size == 0);
+
+    // Ordinary proposals are admitted up to, but not beyond, the limit.
+    assert(raft_raw_node_propose(node, &below_limit) == RAFT_OK);
+    assert(node->raft.uncommitted_size == 2);
+    assert(raft_raw_node_propose(node, &below_limit) == RAFT_OK);
+    assert(node->raft.uncommitted_size == 4);
+    assert(raft_raw_node_propose(node, &one_byte) ==
+           RAFT_ERR_PROPOSAL_DROPPED);
+    assert(node->raft.uncommitted_size == 4);
+
+    assert(raft_log_last_index(
+               &node->log, &append_response.index) == RAFT_OK);
+    assert(raft_raw_node_step(node, &append_response) == RAFT_OK);
+    iterations = 0;
+    while (raft_raw_node_has_ready(node)) {
+        assert(iterations++ < 8);
+        accept_and_advance(node, &storage);
+    }
+    assert(node->raft.uncommitted_size == 0);
+    assert(raft_raw_node_propose(node, &oversized) == RAFT_OK);
+    assert(node->raft.uncommitted_size == 5);
     raft_raw_node_destroy(node);
 }
 

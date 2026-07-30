@@ -516,9 +516,10 @@ static int core_append_entries(raft_t *raft,
         owned[i].index = last_index + 1 + (uint64_t)i;
     }
     payload_size = core_payload_size(owned, entry_count);
-    if (payload_size > raft->max_uncommitted_entries_size ||
-        raft->uncommitted_size >
-            raft->max_uncommitted_entries_size - payload_size) {
+    if (raft->uncommitted_size > 0 && payload_size > 0 &&
+        (payload_size > raft->max_uncommitted_entries_size ||
+         raft->uncommitted_size >
+             raft->max_uncommitted_entries_size - payload_size)) {
         raft_entry_array_free(owned, entry_count);
         return RAFT_ERR_PROPOSAL_DROPPED;
     }
