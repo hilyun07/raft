@@ -125,8 +125,8 @@ int raft_log_is_up_to_date(raft_log_t *log,
                            uint64_t candidate_term,
                            bool *up_to_date);
 
-// Internal size helper. The current raft_entry_t lacks protobuf scalar
-// presence bits, so zero-valued scalar fields are treated as absent.
+// Internal size helper matching proto.Size for the represented Entry,
+// including optional-field presence, present-empty Data, and unknown bytes.
 uint64_t raft_log_entry_encoding_size(const raft_entry_t *entry);
 
 #endif  // ETCD_RAFT_LOG_H

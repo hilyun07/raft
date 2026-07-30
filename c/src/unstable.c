@@ -32,6 +32,12 @@ static int unstable_entry_copy(raft_entry_t *dst, const raft_entry_t *src) {
     dst->term = src->term;
     dst->index = src->index;
     result = raft_bytes_copy(&dst->data, &src->data);
+    if (result == RAFT_OK) {
+        dst->protobuf.fields = src->protobuf.fields;
+        result = raft_bytes_copy(
+            &dst->protobuf.unknown_fields,
+            &src->protobuf.unknown_fields);
+    }
     if (result != RAFT_OK) {
         raft_entry_free(dst);
     }
@@ -99,6 +105,29 @@ static int unstable_snapshot_copy(raft_snapshot_t *dst,
         src->metadata.conf_state.learners_next.len;
     view.metadata.conf_state.auto_leave =
         src->metadata.conf_state.auto_leave;
+    view.metadata.conf_state.protobuf.fields =
+        src->metadata.conf_state.protobuf.fields;
+    view.metadata.conf_state.protobuf.unknown_fields.data =
+        src->metadata.conf_state.protobuf.unknown_fields.data;
+    view.metadata.conf_state.protobuf.unknown_fields.len =
+        src->metadata.conf_state.protobuf.unknown_fields.len;
+    view.metadata.conf_state.protobuf.unknown_fields.is_nil =
+        src->metadata.conf_state.protobuf.unknown_fields.is_nil;
+    view.metadata.protobuf.fields =
+        src->metadata.protobuf.fields;
+    view.metadata.protobuf.unknown_fields.data =
+        src->metadata.protobuf.unknown_fields.data;
+    view.metadata.protobuf.unknown_fields.len =
+        src->metadata.protobuf.unknown_fields.len;
+    view.metadata.protobuf.unknown_fields.is_nil =
+        src->metadata.protobuf.unknown_fields.is_nil;
+    view.protobuf.fields = src->protobuf.fields;
+    view.protobuf.unknown_fields.data =
+        src->protobuf.unknown_fields.data;
+    view.protobuf.unknown_fields.len =
+        src->protobuf.unknown_fields.len;
+    view.protobuf.unknown_fields.is_nil =
+        src->protobuf.unknown_fields.is_nil;
     return raft_snapshot_copy_from_view(dst, &view);
 }
 

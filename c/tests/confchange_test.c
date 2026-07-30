@@ -161,6 +161,27 @@ static void test_simple_and_transactional_changes(void) {
     raft_tracker_free(&tracker);
 }
 
+static void test_restore_rejects_conf_state_unknown_fields(void) {
+    raft_progress_tracker_t tracker = {0};
+    uint64_t voters[] = {1};
+    uint8_t unknown[] = {0xa0, 0x06, 0x01};
+    raft_conf_state_t state = {
+        .voters = {.items = voters, .len = 1},
+        .protobuf = {
+            .unknown_fields = {
+                .data = unknown,
+                .len = sizeof(unknown),
+                .is_nil = false,
+            },
+        },
+    };
+
+    assert(raft_tracker_init(&tracker, 8, 0) == RAFT_OK);
+    assert(raft_confchange_restore(&tracker, &state, 1) ==
+           RAFT_ERR_FATAL);
+    raft_tracker_free(&tracker);
+}
+
 static void test_joint_demotion_preserves_progress(void) {
     raft_progress_tracker_t tracker;
     raft_conf_change_single_t demote[] = {
@@ -283,14 +304,26 @@ static void test_configuration_changes_preserve_vote_history(void) {
 
 static void test_protobuf_round_trip(void) {
     const uint8_t context[] = {4, 5};
+    const uint8_t v1_unknown[] = {0xa0, 0x06, 0x07};
+    const uint8_t single_unknown[] = {0xa8, 0x06, 0x08};
+    const uint8_t v2_unknown[] = {0xb0, 0x06, 0x09};
     raft_conf_change_view_t v1 = {
         .id = 9,
         .type = RAFT_CONF_CHANGE_REMOVE_NODE,
         .node_id = 3,
         .context = {context, sizeof(context), false},
+        .unknown_fields = {
+            v1_unknown, sizeof(v1_unknown), false,
+        },
     };
     raft_conf_change_single_t singles[] = {
-        {.type = RAFT_CONF_CHANGE_ADD_NODE, .node_id = 4},
+        {
+            .type = RAFT_CONF_CHANGE_ADD_NODE,
+            .node_id = 4,
+            .unknown_fields = {
+                single_unknown, sizeof(single_unknown), false,
+            },
+        },
         {.type = RAFT_CONF_CHANGE_REMOVE_NODE, .node_id = 2},
     };
     raft_conf_change_v2_view_t v2 = {
@@ -298,6 +331,9 @@ static void test_protobuf_round_trip(void) {
         .changes = singles,
         .changes_len = 2,
         .context = {context, sizeof(context), false},
+        .unknown_fields = {
+            v2_unknown, sizeof(v2_unknown), false,
+        },
     };
     raft_bytes_t encoded;
     raft_byte_view_t view;
@@ -305,6 +341,10 @@ static void test_protobuf_round_trip(void) {
 
     memset(&encoded, 0, sizeof(encoded));
     assert(raft_confchange_encode_v1(&v1, &encoded) == RAFT_OK);
+    assert(encoded.len >= sizeof(v1_unknown));
+    assert(memcmp(encoded.data + encoded.len - sizeof(v1_unknown),
+                  v1_unknown,
+                  sizeof(v1_unknown)) == 0);
     view = (raft_byte_view_t){
         encoded.data, encoded.len, encoded.is_nil,
     };
@@ -318,6 +358,25 @@ static void test_protobuf_round_trip(void) {
 
     memset(&encoded, 0, sizeof(encoded));
     assert(raft_confchange_encode_v2(&v2, &encoded) == RAFT_OK);
+    assert(encoded.len >= sizeof(v2_unknown));
+    assert(memcmp(encoded.data + encoded.len - sizeof(v2_unknown),
+                  v2_unknown,
+                  sizeof(v2_unknown)) == 0);
+    {
+        bool found_single_unknown = false;
+        size_t i;
+        for (i = 0;
+             i + sizeof(single_unknown) <= encoded.len;
+             ++i) {
+            if (memcmp(encoded.data + i,
+                       single_unknown,
+                       sizeof(single_unknown)) == 0) {
+                found_single_unknown = true;
+                break;
+            }
+        }
+        assert(found_single_unknown);
+    }
     view = (raft_byte_view_t){
         encoded.data, encoded.len, encoded.is_nil,
     };
@@ -334,6 +393,7 @@ static void test_protobuf_round_trip(void) {
 
 int main(void) {
     test_restore_rejects_noncanonical_conf_states();
+    test_restore_rejects_conf_state_unknown_fields();
     test_simple_and_transactional_changes();
     test_joint_demotion_preserves_progress();
     test_configuration_changes_preserve_vote_history();

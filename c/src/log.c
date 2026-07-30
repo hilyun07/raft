@@ -29,29 +29,54 @@ static uint64_t log_varint_size(uint64_t value) {
     return size;
 }
 
+static bool log_size_add(uint64_t *size, uint64_t extra) {
+    if (size == NULL || extra > UINT64_MAX - *size) {
+        return false;
+    }
+    *size += extra;
+    return true;
+}
+
 uint64_t raft_log_entry_encoding_size(const raft_entry_t *entry) {
     uint64_t size = 0;
+    uint64_t field_size;
 
     if (entry == NULL) {
         return 0;
     }
-    if (entry->type != RAFT_ENTRY_NORMAL) {
-        size += 1 + log_varint_size((uint64_t)entry->type);
-    }
-    if (entry->term != 0) {
-        size += 1 + log_varint_size(entry->term);
-    }
-    if (entry->index != 0) {
-        size += 1 + log_varint_size(entry->index);
-    }
-    if (entry->data.len != 0) {
-        uint64_t length = (uint64_t)entry->data.len;
-        uint64_t overhead = 1 + log_varint_size(length);
-        if (size > UINT64_MAX - overhead ||
-            length > UINT64_MAX - size - overhead) {
+    if ((entry->protobuf.fields & RAFT_ENTRY_PROTO_TYPE) != 0 ||
+        entry->type != RAFT_ENTRY_NORMAL) {
+        field_size = 1 + log_varint_size((uint64_t)entry->type);
+        if (!log_size_add(&size, field_size)) {
             return UINT64_MAX;
         }
-        size += overhead + length;
+    }
+    if ((entry->protobuf.fields & RAFT_ENTRY_PROTO_TERM) != 0 ||
+        entry->term != 0) {
+        field_size = 1 + log_varint_size(entry->term);
+        if (!log_size_add(&size, field_size)) {
+            return UINT64_MAX;
+        }
+    }
+    if ((entry->protobuf.fields & RAFT_ENTRY_PROTO_INDEX) != 0 ||
+        entry->index != 0) {
+        field_size = 1 + log_varint_size(entry->index);
+        if (!log_size_add(&size, field_size)) {
+            return UINT64_MAX;
+        }
+    }
+    if (!entry->data.is_nil) {
+        uint64_t length = (uint64_t)entry->data.len;
+        uint64_t overhead = 1 + log_varint_size(length);
+        if (!log_size_add(&size, overhead) ||
+            !log_size_add(&size, length)) {
+            return UINT64_MAX;
+        }
+    }
+    if (!log_size_add(
+            &size,
+            (uint64_t)entry->protobuf.unknown_fields.len)) {
+        return UINT64_MAX;
     }
     return size;
 }

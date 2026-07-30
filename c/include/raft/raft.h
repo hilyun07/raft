@@ -167,6 +167,54 @@ typedef struct raft_bytes {
     bool is_nil;
 } raft_bytes_t;
 
+// Opaque Go-protobuf object metadata. The C Raft algorithm never interprets
+// unknown_fields; it only copies and returns them with the enclosing semantic
+// object. fields is a per-message-type presence mask for proto2 optional
+// scalar or nested-message fields. Optional bytes use raft_bytes_t.is_nil (or
+// raft_byte_view_t.is_nil) as their presence bit.
+typedef struct raft_protobuf_metadata_view {
+    uint32_t fields;
+    raft_byte_view_t unknown_fields;
+} raft_protobuf_metadata_view_t;
+
+typedef struct raft_protobuf_metadata {
+    uint32_t fields;
+    raft_bytes_t unknown_fields;
+} raft_protobuf_metadata_t;
+
+enum {
+    RAFT_CONF_STATE_PROTO_AUTO_LEAVE = UINT32_C(1) << 0,
+};
+
+enum {
+    RAFT_SNAPSHOT_METADATA_PROTO_CONF_STATE = UINT32_C(1) << 0,
+    RAFT_SNAPSHOT_METADATA_PROTO_INDEX = UINT32_C(1) << 1,
+    RAFT_SNAPSHOT_METADATA_PROTO_TERM = UINT32_C(1) << 2,
+};
+
+enum {
+    RAFT_SNAPSHOT_PROTO_METADATA = UINT32_C(1) << 0,
+};
+
+enum {
+    RAFT_ENTRY_PROTO_TYPE = UINT32_C(1) << 0,
+    RAFT_ENTRY_PROTO_TERM = UINT32_C(1) << 1,
+    RAFT_ENTRY_PROTO_INDEX = UINT32_C(1) << 2,
+};
+
+enum {
+    RAFT_MESSAGE_PROTO_TYPE = UINT32_C(1) << 0,
+    RAFT_MESSAGE_PROTO_TO = UINT32_C(1) << 1,
+    RAFT_MESSAGE_PROTO_FROM = UINT32_C(1) << 2,
+    RAFT_MESSAGE_PROTO_TERM = UINT32_C(1) << 3,
+    RAFT_MESSAGE_PROTO_LOG_TERM = UINT32_C(1) << 4,
+    RAFT_MESSAGE_PROTO_INDEX = UINT32_C(1) << 5,
+    RAFT_MESSAGE_PROTO_COMMIT = UINT32_C(1) << 6,
+    RAFT_MESSAGE_PROTO_VOTE = UINT32_C(1) << 7,
+    RAFT_MESSAGE_PROTO_REJECT = UINT32_C(1) << 8,
+    RAFT_MESSAGE_PROTO_REJECT_HINT = UINT32_C(1) << 9,
+};
+
 // Canonical forms accepted by both helpers:
 // nil:     {NULL, 0, true}
 // empty:   {NULL, 0, false}
@@ -209,6 +257,7 @@ typedef struct raft_conf_state {
     raft_uint64_vec_t learners;
     raft_uint64_vec_t learners_next;
     bool auto_leave;
+    raft_protobuf_metadata_t protobuf;
 } raft_conf_state_t;
 
 typedef struct raft_conf_state_view {
@@ -217,18 +266,21 @@ typedef struct raft_conf_state_view {
     raft_uint64_view_t learners;
     raft_uint64_view_t learners_next;
     bool auto_leave;
+    raft_protobuf_metadata_view_t protobuf;
 } raft_conf_state_view_t;
 
 typedef struct raft_snapshot_metadata {
     raft_conf_state_t conf_state;
     uint64_t index;
     uint64_t term;
+    raft_protobuf_metadata_t protobuf;
 } raft_snapshot_metadata_t;
 
 typedef struct raft_snapshot_metadata_view {
     raft_conf_state_view_t conf_state;
     uint64_t index;
     uint64_t term;
+    raft_protobuf_metadata_view_t protobuf;
 } raft_snapshot_metadata_view_t;
 
 // Borrowed snapshot input. All nested pointers are call-scoped. A Go binding
@@ -237,6 +289,7 @@ typedef struct raft_snapshot_metadata_view {
 typedef struct raft_snapshot_view {
     raft_byte_view_t data;
     raft_snapshot_metadata_view_t metadata;
+    raft_protobuf_metadata_view_t protobuf;
 } raft_snapshot_view_t;
 
 typedef struct raft_snapshot {
@@ -244,6 +297,7 @@ typedef struct raft_snapshot {
     // index, not data length, determines whether the snapshot is empty.
     raft_bytes_t data;
     raft_snapshot_metadata_t metadata;
+    raft_protobuf_metadata_t protobuf;
 } raft_snapshot_t;
 
 typedef struct raft_entry_view {
@@ -251,6 +305,7 @@ typedef struct raft_entry_view {
     uint64_t term;
     uint64_t index;
     raft_byte_view_t data;
+    raft_protobuf_metadata_view_t protobuf;
 } raft_entry_view_t;
 
 typedef struct raft_entry {
@@ -259,6 +314,7 @@ typedef struct raft_entry {
     uint64_t index;
     // Entry.Data is opaque and preserves nil versus present-empty.
     raft_bytes_t data;
+    raft_protobuf_metadata_t protobuf;
 } raft_entry_t;
 
 typedef struct raft_entry_view_vec {
@@ -304,6 +360,7 @@ struct raft_message_view {
     raft_snapshot_view_t snapshot;
     raft_byte_view_t context;
     raft_message_view_vec_t responses;
+    raft_protobuf_metadata_view_t protobuf;
 };
 
 struct raft_message {
@@ -323,6 +380,7 @@ struct raft_message {
     // Message.Context is opaque and preserves nil versus present-empty.
     raft_bytes_t context;
     raft_message_vec_t responses;
+    raft_protobuf_metadata_t protobuf;
 };
 
 typedef struct raft_read_state {
@@ -365,6 +423,7 @@ typedef struct raft_conf_change_view {
     bool has_id;
     bool has_type;
     bool has_node_id;
+    raft_byte_view_t unknown_fields;
 } raft_conf_change_view_t;
 
 typedef struct raft_conf_change_single {
@@ -372,6 +431,7 @@ typedef struct raft_conf_change_single {
     uint64_t node_id;
     bool has_type;
     bool has_node_id;
+    raft_byte_view_t unknown_fields;
 } raft_conf_change_single_t;
 
 typedef struct raft_conf_change_v2_view {
@@ -380,6 +440,7 @@ typedef struct raft_conf_change_v2_view {
     size_t changes_len;
     raft_byte_view_t context;
     bool has_transition;
+    raft_byte_view_t unknown_fields;
 } raft_conf_change_v2_view_t;
 
 typedef struct raft_progress {

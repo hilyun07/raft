@@ -119,6 +119,21 @@ static int proto_put_bytes(proto_writer_t *writer,
     return result;
 }
 
+static int proto_put_raw(proto_writer_t *writer,
+                         const raft_byte_view_t *raw) {
+    int result;
+
+    if (writer == NULL || !raft_byte_view_valid(raw)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    result = proto_reserve(writer, raw->len);
+    if (result == RAFT_OK && raw->len != 0) {
+        memcpy(&writer->data[writer->len], raw->data, raw->len);
+        writer->len += raw->len;
+    }
+    return result;
+}
+
 static void proto_writer_free(proto_writer_t *writer) {
     if (writer == NULL) {
         return;
@@ -229,7 +244,8 @@ static int encode_single(const raft_conf_change_single_t *change,
                          proto_writer_t *out) {
     int result = RAFT_OK;
     if (change == NULL || out == NULL ||
-        !confchange_type_valid(change->type)) {
+        !confchange_type_valid(change->type) ||
+        !raft_byte_view_valid(&change->unknown_fields)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     if (change->has_type ||
@@ -240,6 +256,9 @@ static int encode_single(const raft_conf_change_single_t *change,
     if (result == RAFT_OK &&
         (change->has_node_id || change->node_id != 0)) {
         result = proto_put_uint64(out, 2, change->node_id);
+    }
+    if (result == RAFT_OK) {
+        result = proto_put_raw(out, &change->unknown_fields);
     }
     return result;
 }
@@ -253,7 +272,8 @@ int raft_confchange_encode_v2(const raft_conf_change_v2_view_t *change,
     if (change == NULL || out == NULL ||
         !confchange_transition_valid(change->transition) ||
         !confchange_array_valid(change->changes, change->changes_len) ||
-        !raft_byte_view_valid(&change->context)) {
+        !raft_byte_view_valid(&change->context) ||
+        !raft_byte_view_valid(&change->unknown_fields)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     memset(out, 0, sizeof(*out));
@@ -288,6 +308,10 @@ int raft_confchange_encode_v2(const raft_conf_change_v2_view_t *change,
             goto fail;
         }
     }
+    result = proto_put_raw(&writer, &change->unknown_fields);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
     return proto_finish(&writer, out);
 
 fail:
@@ -302,7 +326,8 @@ int raft_confchange_encode_v1(const raft_conf_change_view_t *change,
 
     if (change == NULL || out == NULL ||
         !confchange_type_valid(change->type) ||
-        !raft_byte_view_valid(&change->context)) {
+        !raft_byte_view_valid(&change->context) ||
+        !raft_byte_view_valid(&change->unknown_fields)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     memset(out, 0, sizeof(*out));
@@ -329,6 +354,10 @@ int raft_confchange_encode_v1(const raft_conf_change_view_t *change,
                                  change->context.data,
                                  change->context.len);
     }
+    if (result != RAFT_OK) {
+        goto fail;
+    }
+    result = proto_put_raw(&writer, &change->unknown_fields);
     if (result != RAFT_OK) {
         goto fail;
     }
@@ -662,6 +691,15 @@ int raft_confchange_restore(raft_progress_tracker_t *tracker,
         !confchange_array_valid(state->learners_next.items,
                                 state->learners_next.len)) {
         return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    /*
+     * etcd validates the restored configuration by comparing it with the
+     * tracker-generated ConfState. ConfState.Equivalent normalizes member
+     * ordering and absent AutoLeave, but deliberately retains protobuf
+     * unknown fields, so any unknown field makes that invariant fail.
+     */
+    if (state->protobuf.unknown_fields.len != 0) {
+        return RAFT_ERR_FATAL;
     }
     if (state->voters.len == 0 &&
         (state->voters_outgoing.len != 0 ||

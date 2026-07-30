@@ -30,6 +30,8 @@ import (
 	"runtime"
 	"unsafe"
 
+	"google.golang.org/protobuf/proto"
+
 	"go.etcd.io/raft/v3/quorum"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.etcd.io/raft/v3/tracker"
@@ -96,8 +98,22 @@ func (a *cInputArena) setUint64View(dst *C.raft_uint64_view_t, src []uint64) {
 	dst.len = C.size_t(len(src))
 }
 
+func (a *cInputArena) fillProtobufMetadata(
+	dst *C.raft_protobuf_metadata_view_t,
+	fields C.uint32_t,
+	src proto.Message,
+) {
+	dst.fields = fields
+	if src == nil {
+		a.setByteView(&dst.unknown_fields, nil)
+		return
+	}
+	a.setByteView(&dst.unknown_fields, src.ProtoReflect().GetUnknown())
+}
+
 func (a *cInputArena) fillConfStateView(dst *C.raft_conf_state_view_t, src *pb.ConfState) {
 	if src == nil {
+		a.fillProtobufMetadata(&dst.protobuf, 0, nil)
 		return
 	}
 	a.setUint64View(&dst.voters, src.Voters)
@@ -105,31 +121,68 @@ func (a *cInputArena) fillConfStateView(dst *C.raft_conf_state_view_t, src *pb.C
 	a.setUint64View(&dst.learners, src.Learners)
 	a.setUint64View(&dst.learners_next, src.LearnersNext)
 	dst.auto_leave = cBool(src.GetAutoLeave())
+	var fields C.uint32_t
+	if src.AutoLeave != nil {
+		fields |= C.RAFT_CONF_STATE_PROTO_AUTO_LEAVE
+	}
+	a.fillProtobufMetadata(&dst.protobuf, fields, src)
 }
 
 func (a *cInputArena) fillSnapshotView(dst *C.raft_snapshot_view_t, src *pb.Snapshot) {
 	if src == nil {
+		a.setByteView(&dst.data, nil)
+		a.fillProtobufMetadata(&dst.protobuf, 0, nil)
 		return
 	}
 	a.setByteView(&dst.data, src.Data)
+	var snapshotFields C.uint32_t
+	if src.Metadata != nil {
+		snapshotFields |= C.RAFT_SNAPSHOT_PROTO_METADATA
+	}
+	a.fillProtobufMetadata(&dst.protobuf, snapshotFields, src)
 	metadata := src.GetMetadata()
 	if metadata == nil {
+		a.fillProtobufMetadata(&dst.metadata.protobuf, 0, nil)
+		a.fillConfStateView(&dst.metadata.conf_state, nil)
 		return
 	}
 	dst.metadata.index = C.uint64_t(metadata.GetIndex())
 	dst.metadata.term = C.uint64_t(metadata.GetTerm())
+	var metadataFields C.uint32_t
+	if metadata.ConfState != nil {
+		metadataFields |= C.RAFT_SNAPSHOT_METADATA_PROTO_CONF_STATE
+	}
+	if metadata.Index != nil {
+		metadataFields |= C.RAFT_SNAPSHOT_METADATA_PROTO_INDEX
+	}
+	if metadata.Term != nil {
+		metadataFields |= C.RAFT_SNAPSHOT_METADATA_PROTO_TERM
+	}
+	a.fillProtobufMetadata(&dst.metadata.protobuf, metadataFields, metadata)
 	a.fillConfStateView(&dst.metadata.conf_state, metadata.GetConfState())
 }
 
 func (a *cInputArena) fillEntryView(dst *C.raft_entry_view_t, src *pb.Entry) {
 	if src == nil {
 		a.setByteView(&dst.data, nil)
+		a.fillProtobufMetadata(&dst.protobuf, 0, nil)
 		return
 	}
 	dst._type = C.raft_entry_type_t(src.GetType())
 	dst.term = C.uint64_t(src.GetTerm())
 	dst.index = C.uint64_t(src.GetIndex())
 	a.setByteView(&dst.data, src.Data)
+	var fields C.uint32_t
+	if src.Type != nil {
+		fields |= C.RAFT_ENTRY_PROTO_TYPE
+	}
+	if src.Term != nil {
+		fields |= C.RAFT_ENTRY_PROTO_TERM
+	}
+	if src.Index != nil {
+		fields |= C.RAFT_ENTRY_PROTO_INDEX
+	}
+	a.fillProtobufMetadata(&dst.protobuf, fields, src)
 }
 
 func makeMessageView(a *cInputArena, src *pb.Message) (*C.raft_message_view_t, error) {
@@ -140,6 +193,7 @@ func makeMessageView(a *cInputArena, src *pb.Message) (*C.raft_message_view_t, e
 	dst := (*C.raft_message_view_t)(p)
 	if src == nil {
 		a.setByteView(&dst.context, nil)
+		a.fillProtobufMetadata(&dst.protobuf, 0, nil)
 		return dst, nil
 	}
 
@@ -154,6 +208,38 @@ func makeMessageView(a *cInputArena, src *pb.Message) (*C.raft_message_view_t, e
 	dst.reject = cBool(src.GetReject())
 	dst.reject_hint = C.uint64_t(src.GetRejectHint())
 	a.setByteView(&dst.context, src.Context)
+	var fields C.uint32_t
+	if src.Type != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_TYPE
+	}
+	if src.To != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_TO
+	}
+	if src.From != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_FROM
+	}
+	if src.Term != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_TERM
+	}
+	if src.LogTerm != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_LOG_TERM
+	}
+	if src.Index != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_INDEX
+	}
+	if src.Commit != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_COMMIT
+	}
+	if src.Vote != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_VOTE
+	}
+	if src.Reject != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_REJECT
+	}
+	if src.RejectHint != nil {
+		fields |= C.RAFT_MESSAGE_PROTO_REJECT_HINT
+	}
+	a.fillProtobufMetadata(&dst.protobuf, fields, src)
 
 	if len(src.Entries) != 0 {
 		items, allocErr := a.alloc(
@@ -215,6 +301,7 @@ func makeConfChangeV2View(
 	dst.transition = C.raft_conf_change_transition_t(src.GetTransition())
 	dst.has_transition = cBool(src.Transition != nil)
 	a.setByteView(&dst.context, src.Context)
+	a.setByteView(&dst.unknown_fields, src.ProtoReflect().GetUnknown())
 	if len(src.Changes) == 0 {
 		return dst, nil
 	}
@@ -234,6 +321,10 @@ func makeConfChangeV2View(
 		changes[i].node_id = C.uint64_t(change.GetNodeId())
 		changes[i].has_type = cBool(change.Type != nil)
 		changes[i].has_node_id = cBool(change.NodeId != nil)
+		a.setByteView(
+			&changes[i].unknown_fields,
+			change.ProtoReflect().GetUnknown(),
+		)
 	}
 	dst.changes = (*C.raft_conf_change_single_t)(items)
 	dst.changes_len = C.size_t(len(changes))
@@ -250,6 +341,7 @@ func makeConfChangeV1View(
 	dst := (*C.raft_conf_change_view_t)(p)
 	if src == nil {
 		a.setByteView(&dst.context, nil)
+		a.setByteView(&dst.unknown_fields, nil)
 		return dst, nil
 	}
 	dst.id = C.uint64_t(src.GetId())
@@ -259,6 +351,7 @@ func makeConfChangeV1View(
 	dst.has_type = cBool(src.Type != nil)
 	dst.has_node_id = cBool(src.NodeId != nil)
 	a.setByteView(&dst.context, src.Context)
+	a.setByteView(&dst.unknown_fields, src.ProtoReflect().GetUnknown())
 	return dst, nil
 }
 
@@ -286,19 +379,36 @@ func cOwnedBytes(src C.raft_bytes_t) []byte {
 	return out
 }
 
+func cProtoHas(fields C.uint32_t, field C.uint32_t) bool {
+	return fields&field != 0
+}
+
+func cSetUnknown(dst proto.Message, src C.raft_bytes_t) {
+	unknown := cOwnedBytes(src)
+	if len(unknown) != 0 {
+		dst.ProtoReflect().SetUnknown(unknown)
+	}
+}
+
 func cEntry(src *C.raft_entry_t) *pb.Entry {
 	if src == nil {
 		return nil
 	}
+	out := &pb.Entry{Data: cOwnedBytes(src.data)}
 	typ := pb.EntryType(src._type)
 	term := uint64(src.term)
 	index := uint64(src.index)
-	return &pb.Entry{
-		Type:  &typ,
-		Term:  &term,
-		Index: &index,
-		Data:  cOwnedBytes(src.data),
+	if cProtoHas(src.protobuf.fields, C.RAFT_ENTRY_PROTO_TYPE) {
+		out.Type = &typ
 	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_ENTRY_PROTO_TERM) {
+		out.Term = &term
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_ENTRY_PROTO_INDEX) {
+		out.Index = &index
+	}
+	cSetUnknown(out, src.protobuf.unknown_fields)
+	return out
 }
 
 func cEntryVec(src C.raft_entry_vec_t) []*pb.Entry {
@@ -331,30 +441,58 @@ func cConfState(src *C.raft_conf_state_t) *pb.ConfState {
 	if src == nil {
 		return nil
 	}
-	autoLeave := bool(src.auto_leave)
-	return &pb.ConfState{
+	out := &pb.ConfState{
 		Voters:         cUint64Vec(src.voters),
 		VotersOutgoing: cUint64Vec(src.voters_outgoing),
 		Learners:       cUint64Vec(src.learners),
 		LearnersNext:   cUint64Vec(src.learners_next),
-		AutoLeave:      &autoLeave,
 	}
+	if cProtoHas(
+		src.protobuf.fields,
+		C.RAFT_CONF_STATE_PROTO_AUTO_LEAVE,
+	) {
+		autoLeave := bool(src.auto_leave)
+		out.AutoLeave = &autoLeave
+	}
+	cSetUnknown(out, src.protobuf.unknown_fields)
+	return out
 }
 
 func cSnapshot(src *C.raft_snapshot_t) *pb.Snapshot {
 	if src == nil {
 		return nil
 	}
-	index := uint64(src.metadata.index)
-	term := uint64(src.metadata.term)
-	return &pb.Snapshot{
-		Data: cOwnedBytes(src.data),
-		Metadata: &pb.SnapshotMetadata{
-			ConfState: cConfState(&src.metadata.conf_state),
-			Index:     &index,
-			Term:      &term,
-		},
+	out := &pb.Snapshot{Data: cOwnedBytes(src.data)}
+	if cProtoHas(
+		src.protobuf.fields,
+		C.RAFT_SNAPSHOT_PROTO_METADATA,
+	) {
+		metadata := &pb.SnapshotMetadata{}
+		if cProtoHas(
+			src.metadata.protobuf.fields,
+			C.RAFT_SNAPSHOT_METADATA_PROTO_CONF_STATE,
+		) {
+			metadata.ConfState = cConfState(&src.metadata.conf_state)
+		}
+		if cProtoHas(
+			src.metadata.protobuf.fields,
+			C.RAFT_SNAPSHOT_METADATA_PROTO_INDEX,
+		) {
+			index := uint64(src.metadata.index)
+			metadata.Index = &index
+		}
+		if cProtoHas(
+			src.metadata.protobuf.fields,
+			C.RAFT_SNAPSHOT_METADATA_PROTO_TERM,
+		) {
+			term := uint64(src.metadata.term)
+			metadata.Term = &term
+		}
+		cSetUnknown(metadata, src.metadata.protobuf.unknown_fields)
+		out.Metadata = metadata
 	}
+	cSetUnknown(out, src.protobuf.unknown_fields)
+	return out
 }
 
 func cMessage(src *C.raft_message_t) *pb.Message {
@@ -372,24 +510,38 @@ func cMessage(src *C.raft_message_t) *pb.Message {
 	reject := bool(src.reject)
 	rejectHint := uint64(src.reject_hint)
 	out := &pb.Message{
-		Type:       &typ,
-		To:         &to,
-		From:       &from,
-		LogTerm:    &logTerm,
-		Index:      &index,
-		Entries:    cEntryVec(src.entries),
-		Reject:     &reject,
-		RejectHint: &rejectHint,
-		Context:    cOwnedBytes(src.context),
+		Entries: cEntryVec(src.entries),
+		Context: cOwnedBytes(src.context),
 	}
-	// MsgStorageAppend uses the three fields as an optional HardState tuple.
-	// A valid changed HardState cannot transition back to all zero values, so
-	// the all-zero tuple produced by C unambiguously means that no update was
-	// attached. Preserve Go's required all-present/all-absent shape here.
-	if typ != pb.MsgStorageAppend || term != 0 || vote != 0 || commit != 0 {
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_TYPE) {
+		out.Type = &typ
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_TO) {
+		out.To = &to
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_FROM) {
+		out.From = &from
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_TERM) {
 		out.Term = &term
-		out.Vote = &vote
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_LOG_TERM) {
+		out.LogTerm = &logTerm
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_INDEX) {
+		out.Index = &index
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_COMMIT) {
 		out.Commit = &commit
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_VOTE) {
+		out.Vote = &vote
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_REJECT) {
+		out.Reject = &reject
+	}
+	if cProtoHas(src.protobuf.fields, C.RAFT_MESSAGE_PROTO_REJECT_HINT) {
+		out.RejectHint = &rejectHint
 	}
 	if bool(src.has_snapshot) {
 		out.Snapshot = cSnapshot(&src.snapshot)
@@ -402,6 +554,7 @@ func cMessage(src *C.raft_message_t) *pb.Message {
 			out.Responses[i] = cMessage(&rows[i])
 		}
 	}
+	cSetUnknown(out, src.protobuf.unknown_fields)
 	return out
 }
 

@@ -562,6 +562,7 @@ static void test_nil_empty_validation(void) {
 
 static void test_copy_helpers(void) {
     uint8_t source_data[] = {1, 2, 3};
+    uint8_t unknown_data[] = {0xa0, 0x06, 0x07};
     uint64_t voters[] = {1, 2};
     raft_byte_view_t source = {source_data, sizeof(source_data), false};
     raft_bytes_t copied = {0};
@@ -571,6 +572,14 @@ static void test_copy_helpers(void) {
         .term = 2,
         .index = 3,
         .data = {source_data, sizeof(source_data), false},
+        .protobuf = {
+            .fields = RAFT_ENTRY_PROTO_TYPE |
+                      RAFT_ENTRY_PROTO_TERM |
+                      RAFT_ENTRY_PROTO_INDEX,
+            .unknown_fields = {
+                unknown_data, sizeof(unknown_data), false,
+            },
+        },
     };
     raft_entry_t entry = {0};
     raft_snapshot_view_t snapshot_view = {
@@ -581,6 +590,20 @@ static void test_copy_helpers(void) {
             },
             .index = 4,
             .term = 2,
+            .protobuf = {
+                .fields = RAFT_SNAPSHOT_METADATA_PROTO_CONF_STATE |
+                          RAFT_SNAPSHOT_METADATA_PROTO_INDEX |
+                          RAFT_SNAPSHOT_METADATA_PROTO_TERM,
+                .unknown_fields = {
+                    unknown_data, sizeof(unknown_data), false,
+                },
+            },
+        },
+        .protobuf = {
+            .fields = RAFT_SNAPSHOT_PROTO_METADATA,
+            .unknown_fields = {
+                unknown_data, sizeof(unknown_data), false,
+            },
         },
     };
     raft_snapshot_t snapshot = {0};
@@ -607,6 +630,15 @@ static void test_copy_helpers(void) {
         },
         .context = {source_data, sizeof(source_data), false},
         .responses = {&response_view, 1},
+        .protobuf = {
+            .fields = RAFT_MESSAGE_PROTO_TYPE |
+                      RAFT_MESSAGE_PROTO_TO |
+                      RAFT_MESSAGE_PROTO_FROM |
+                      RAFT_MESSAGE_PROTO_TERM,
+            .unknown_fields = {
+                unknown_data, sizeof(unknown_data), false,
+            },
+        },
     };
     raft_message_t message = {0};
 
@@ -635,6 +667,11 @@ static void test_copy_helpers(void) {
     assert(raft_entry_copy_from_view(&entry, &entry_view) == RAFT_OK);
     assert(raft_entry_valid(&entry));
     assert(entry.data.data != entry_view.data.data);
+    assert(entry.protobuf.fields == entry_view.protobuf.fields);
+    assert(entry.protobuf.unknown_fields.data != unknown_data);
+    assert(memcmp(entry.protobuf.unknown_fields.data,
+                  unknown_data,
+                  sizeof(unknown_data)) == 0);
 
     assert(raft_snapshot_view_valid(&snapshot_view));
     assert(raft_snapshot_copy_from_view(&snapshot, &snapshot_view) ==
@@ -642,6 +679,8 @@ static void test_copy_helpers(void) {
     assert(raft_snapshot_valid(&snapshot));
     assert(snapshot.data.data != snapshot_view.data.data);
     assert(snapshot.metadata.conf_state.voters.items != voters);
+    assert(snapshot.protobuf.unknown_fields.data != unknown_data);
+    assert(snapshot.metadata.protobuf.unknown_fields.data != unknown_data);
 
     assert(raft_message_view_valid(&message_view));
     assert(raft_message_copy_from_view(&message, &message_view) == RAFT_OK);
@@ -651,6 +690,8 @@ static void test_copy_helpers(void) {
     assert(message.entries.items[0].data.data != entry_view.data.data);
     assert(message.snapshot.data.data != message_view.snapshot.data.data);
     assert(message.responses.items != NULL);
+    assert(message.protobuf.fields == message_view.protobuf.fields);
+    assert(message.protobuf.unknown_fields.data != unknown_data);
 
     raft_entry_free(&entry);
     raft_snapshot_free(&snapshot);

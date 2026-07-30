@@ -87,6 +87,26 @@ static int core_uint64_vec_copy(raft_uint64_vec_t *dst,
     return RAFT_OK;
 }
 
+static int core_protobuf_metadata_copy(
+    raft_protobuf_metadata_t *dst,
+    const raft_protobuf_metadata_t *src) {
+    int result;
+
+    if (dst == NULL || src == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    memset(dst, 0, sizeof(*dst));
+    dst->unknown_fields.is_nil = true;
+    dst->fields = src->fields;
+    result = raft_bytes_copy(
+        &dst->unknown_fields, &src->unknown_fields);
+    if (result != RAFT_OK) {
+        memset(dst, 0, sizeof(*dst));
+        dst->unknown_fields.is_nil = true;
+    }
+    return result;
+}
+
 static int core_conf_state_copy(raft_conf_state_t *dst,
                                 const raft_conf_state_t *src) {
     int result;
@@ -114,6 +134,11 @@ static int core_conf_state_copy(raft_conf_state_t *dst,
         goto fail;
     }
     dst->auto_leave = src->auto_leave;
+    result = core_protobuf_metadata_copy(
+        &dst->protobuf, &src->protobuf);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
     return RAFT_OK;
 
 fail:
@@ -133,6 +158,10 @@ static int core_entry_copy(raft_entry_t *dst, const raft_entry_t *src) {
     dst->term = src->term;
     dst->index = src->index;
     result = raft_bytes_copy(&dst->data, &src->data);
+    if (result == RAFT_OK) {
+        result = core_protobuf_metadata_copy(
+            &dst->protobuf, &src->protobuf);
+    }
     if (result != RAFT_OK) {
         raft_entry_free(dst);
     }
@@ -189,6 +218,16 @@ static int core_snapshot_copy(raft_snapshot_t *dst,
     }
     dst->metadata.index = src->metadata.index;
     dst->metadata.term = src->metadata.term;
+    result = core_protobuf_metadata_copy(
+        &dst->metadata.protobuf, &src->metadata.protobuf);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
+    result = core_protobuf_metadata_copy(
+        &dst->protobuf, &src->protobuf);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
     return RAFT_OK;
 
 fail:
@@ -217,6 +256,11 @@ static int core_message_copy(raft_message_t *dst,
     dst->vote = src->vote;
     dst->reject = src->reject;
     dst->reject_hint = src->reject_hint;
+    result = core_protobuf_metadata_copy(
+        &dst->protobuf, &src->protobuf);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
     result = raft_bytes_copy(&dst->context, &src->context);
     if (result != RAFT_OK) {
         goto fail;
@@ -264,6 +308,7 @@ static void core_message_init(raft_message_t *message,
                               raft_message_type_t type) {
     memset(message, 0, sizeof(*message));
     message->type = type;
+    message->protobuf.fields = RAFT_MESSAGE_PROTO_TYPE;
     message->context.is_nil = true;
     message->snapshot.data.is_nil = true;
 }
@@ -326,6 +371,9 @@ static int core_send(raft_t *raft, raft_message_t *message) {
     if (message->from == RAFT_NONE) {
         message->from = raft->id;
     }
+    message->protobuf.fields |=
+        RAFT_MESSAGE_PROTO_TYPE | RAFT_MESSAGE_PROTO_TO |
+        RAFT_MESSAGE_PROTO_FROM;
     vote_message = message->type == RAFT_MSG_VOTE ||
                    message->type == RAFT_MSG_VOTE_RESP ||
                    message->type == RAFT_MSG_PRE_VOTE ||
@@ -334,6 +382,7 @@ static int core_send(raft_t *raft, raft_message_t *message) {
         if (message->term == 0) {
             return RAFT_ERR_FATAL;
         }
+        message->protobuf.fields |= RAFT_MESSAGE_PROTO_TERM;
     } else {
         if (message->term != 0) {
             return RAFT_ERR_FATAL;
@@ -341,7 +390,26 @@ static int core_send(raft_t *raft, raft_message_t *message) {
         if (message->type != RAFT_MSG_PROP &&
             message->type != RAFT_MSG_READ_INDEX) {
             message->term = raft->term;
+            message->protobuf.fields |= RAFT_MESSAGE_PROTO_TERM;
         }
+    }
+    if (message->log_term != 0) {
+        message->protobuf.fields |= RAFT_MESSAGE_PROTO_LOG_TERM;
+    }
+    if (message->index != 0) {
+        message->protobuf.fields |= RAFT_MESSAGE_PROTO_INDEX;
+    }
+    if (message->commit != 0) {
+        message->protobuf.fields |= RAFT_MESSAGE_PROTO_COMMIT;
+    }
+    if (message->vote != 0) {
+        message->protobuf.fields |= RAFT_MESSAGE_PROTO_VOTE;
+    }
+    if (message->reject) {
+        message->protobuf.fields |= RAFT_MESSAGE_PROTO_REJECT;
+    }
+    if (message->reject_hint != 0) {
+        message->protobuf.fields |= RAFT_MESSAGE_PROTO_REJECT_HINT;
     }
     after_append = message->type == RAFT_MSG_APP_RESP ||
                    message->type == RAFT_MSG_VOTE_RESP ||
@@ -536,6 +604,8 @@ static int core_append_entries(raft_t *raft,
         }
         owned[i].term = raft->term;
         owned[i].index = last_index + 1 + (uint64_t)i;
+        owned[i].protobuf.fields |=
+            RAFT_ENTRY_PROTO_TERM | RAFT_ENTRY_PROTO_INDEX;
     }
     payload_size = core_payload_size(owned, entry_count);
     if (raft->uncommitted_size > 0 && payload_size > 0 &&
@@ -555,6 +625,7 @@ static int core_append_entries(raft_t *raft,
     core_message_init(&response, RAFT_MSG_APP_RESP);
     response.to = raft->id;
     response.index = last_index;
+    response.protobuf.fields |= RAFT_MESSAGE_PROTO_INDEX;
     result = core_send(raft, &response);
     raft_message_free(&response);
     return result;
@@ -628,6 +699,8 @@ static int core_send_vote_request(raft_t *raft,
     message.term = term;
     message.index = last_index;
     message.log_term = last_term;
+    message.protobuf.fields |=
+        RAFT_MESSAGE_PROTO_INDEX | RAFT_MESSAGE_PROTO_LOG_TERM;
     if (campaign_type == CORE_CAMPAIGN_TRANSFER) {
         result = raft_bytes_copy_from_view(
             &message.context, &transfer_context);
@@ -710,6 +783,9 @@ static int core_send_append(raft_t *raft,
     message.index = previous_index;
     message.log_term = previous_term;
     message.commit = raft->log->committed;
+    message.protobuf.fields |=
+        RAFT_MESSAGE_PROTO_INDEX | RAFT_MESSAGE_PROTO_LOG_TERM |
+        RAFT_MESSAGE_PROTO_COMMIT;
     if (progress->state != RAFT_PROGRESS_STATE_REPLICATE ||
         !raft_inflights_full(&progress->inflights)) {
         result = raft_log_entries(raft->log,
@@ -799,6 +875,7 @@ static int core_send_heartbeat(raft_t *raft,
     message.to = progress->id;
     message.commit =
         core_min_u64(progress->match_index, raft->log->committed);
+    message.protobuf.fields |= RAFT_MESSAGE_PROTO_COMMIT;
     result = raft_bytes_copy_from_view(&message.context, context);
     if (result != RAFT_OK) {
         raft_message_free(&message);
@@ -989,6 +1066,9 @@ static int core_send_vote_response(raft_t *raft,
     response.to = to;
     response.term = term;
     response.reject = reject;
+    if (reject) {
+        response.protobuf.fields |= RAFT_MESSAGE_PROTO_REJECT;
+    }
     result = core_send(raft, &response);
     raft_message_free(&response);
     return result;
@@ -1116,6 +1196,24 @@ static int core_send_append_response(raft_t *raft,
     response.reject = reject;
     response.reject_hint = reject_hint;
     response.log_term = log_term;
+    response.protobuf.fields |= RAFT_MESSAGE_PROTO_INDEX;
+    if (reject) {
+        response.protobuf.fields |=
+            RAFT_MESSAGE_PROTO_REJECT |
+            RAFT_MESSAGE_PROTO_REJECT_HINT |
+            RAFT_MESSAGE_PROTO_LOG_TERM;
+    }
+    result = core_send(raft, &response);
+    raft_message_free(&response);
+    return result;
+}
+
+static int core_send_empty_append_response(raft_t *raft, uint64_t to) {
+    raft_message_t response;
+    int result;
+
+    core_message_init(&response, RAFT_MSG_APP_RESP);
+    response.to = to;
     result = core_send(raft, &response);
     raft_message_free(&response);
     return result;
@@ -1354,12 +1452,27 @@ static int core_read_index_owned_view(const raft_message_t *message,
     entry->data.data = message->entries.items[0].data.data;
     entry->data.len = message->entries.items[0].data.len;
     entry->data.is_nil = message->entries.items[0].data.is_nil;
+    entry->protobuf.fields =
+        message->entries.items[0].protobuf.fields;
+    entry->protobuf.unknown_fields.data =
+        message->entries.items[0].protobuf.unknown_fields.data;
+    entry->protobuf.unknown_fields.len =
+        message->entries.items[0].protobuf.unknown_fields.len;
+    entry->protobuf.unknown_fields.is_nil =
+        message->entries.items[0].protobuf.unknown_fields.is_nil;
 
     memset(view, 0, sizeof(*view));
     view->type = message->type;
     view->to = message->to;
     view->from = message->from;
     view->term = message->term;
+    view->protobuf.fields = message->protobuf.fields;
+    view->protobuf.unknown_fields.data =
+        message->protobuf.unknown_fields.data;
+    view->protobuf.unknown_fields.len =
+        message->protobuf.unknown_fields.len;
+    view->protobuf.unknown_fields.is_nil =
+        message->protobuf.unknown_fields.is_nil;
     view->entries.items = entry;
     view->entries.len = 1;
     view->context.data = message->context.data;
@@ -1400,6 +1513,7 @@ static int core_response_to_read_index_request(
     core_message_init(&response, RAFT_MSG_READ_INDEX_RESP);
     response.to = request->from;
     response.index = read_index;
+    response.protobuf.fields |= RAFT_MESSAGE_PROTO_INDEX;
     result = core_entry_vec_copy(&response.entries, &request->entries);
     if (result == RAFT_OK) {
         result = core_send(raft, &response);
@@ -1763,6 +1877,9 @@ static int core_prepare_proposal_entries(
              (!already_joint && wants_leave))) {
             entries[i].type = RAFT_ENTRY_NORMAL;
             entries[i].data =
+                (raft_byte_view_t){NULL, 0, true};
+            entries[i].protobuf.fields = RAFT_ENTRY_PROTO_TYPE;
+            entries[i].protobuf.unknown_fields =
                 (raft_byte_view_t){NULL, 0, true};
         } else {
             if (last_index == UINT64_MAX ||
@@ -2206,6 +2323,9 @@ static int core_bootstrap_entry(raft_entry_t *entry,
     entry->type = RAFT_ENTRY_CONF_CHANGE;
     entry->term = 1;
     entry->index = index;
+    entry->protobuf.fields =
+        RAFT_ENTRY_PROTO_TYPE | RAFT_ENTRY_PROTO_TERM |
+        RAFT_ENTRY_PROTO_INDEX;
     entry->data.is_nil = false;
     entry->data.data = malloc(size);
     if (entry->data.data == NULL) {
@@ -2418,9 +2538,14 @@ static int core_propose_entry(raft_t *raft,
     memset(&entry, 0, sizeof(entry));
     entry.type = type;
     entry.data = *data;
+    if (type != RAFT_ENTRY_NORMAL) {
+        entry.protobuf.fields = RAFT_ENTRY_PROTO_TYPE;
+    }
     memset(&message, 0, sizeof(message));
     message.type = RAFT_MSG_PROP;
     message.from = raft->id;
+    message.protobuf.fields =
+        RAFT_MESSAGE_PROTO_TYPE | RAFT_MESSAGE_PROTO_FROM;
     message.entries.items = &entry;
     message.entries.len = 1;
     return raft_core_step(raft, &message);
@@ -2627,6 +2752,14 @@ static int core_handle_storage_apply_response(
         sizing_entry.term = entry->term;
         sizing_entry.index = entry->index;
         sizing_entry.data.len = entry->data.len;
+        sizing_entry.data.is_nil = entry->data.is_nil;
+        sizing_entry.protobuf.fields = entry->protobuf.fields;
+        sizing_entry.protobuf.unknown_fields.data =
+            (uint8_t *)entry->protobuf.unknown_fields.data;
+        sizing_entry.protobuf.unknown_fields.len =
+            entry->protobuf.unknown_fields.len;
+        sizing_entry.protobuf.unknown_fields.is_nil =
+            entry->protobuf.unknown_fields.is_nil;
         entry_size = raft_log_entry_encoding_size(&sizing_entry);
         if (UINT64_MAX - applying_size < entry_size ||
             UINT64_MAX - payload_size < entry_payload) {
@@ -2698,8 +2831,8 @@ static int core_step_once(raft_t *raft,
         if ((raft->check_quorum || raft->pre_vote) &&
             (message->type == RAFT_MSG_APP ||
              message->type == RAFT_MSG_HEARTBEAT)) {
-            return core_send_append_response(
-                raft, message->from, 0, false, 0, 0);
+            return core_send_empty_append_response(
+                raft, message->from);
         }
         if (message->type == RAFT_MSG_PRE_VOTE) {
             return core_send_vote_response(

@@ -46,6 +46,8 @@ import (
 	"sync"
 	"unsafe"
 
+	"google.golang.org/protobuf/proto"
+
 	pb "go.etcd.io/raft/v3/raftpb"
 )
 
@@ -137,16 +139,39 @@ func copyUint64sToC(dst *C.raft_uint64_vec_t, src []uint64) bool {
 	return true
 }
 
+func copyProtobufMetadataToC(
+	dst *C.raft_protobuf_metadata_t,
+	fields C.uint32_t,
+	src proto.Message,
+) bool {
+	*dst = C.raft_protobuf_metadata_t{}
+	dst.fields = fields
+	if src == nil {
+		dst.unknown_fields.is_nil = cBool(true)
+		return true
+	}
+	return copyBytesToC(
+		&dst.unknown_fields,
+		src.ProtoReflect().GetUnknown(),
+	)
+}
+
 func copyConfStateToC(dst *C.raft_conf_state_t, src *pb.ConfState) bool {
 	*dst = C.raft_conf_state_t{}
 	if src == nil {
+		dst.protobuf.unknown_fields.is_nil = cBool(true)
 		return true
 	}
 	dst.auto_leave = cBool(src.GetAutoLeave())
+	var fields C.uint32_t
+	if src.AutoLeave != nil {
+		fields |= C.RAFT_CONF_STATE_PROTO_AUTO_LEAVE
+	}
 	if !copyUint64sToC(&dst.voters, src.Voters) ||
 		!copyUint64sToC(&dst.voters_outgoing, src.VotersOutgoing) ||
 		!copyUint64sToC(&dst.learners, src.Learners) ||
-		!copyUint64sToC(&dst.learners_next, src.LearnersNext) {
+		!copyUint64sToC(&dst.learners_next, src.LearnersNext) ||
+		!copyProtobufMetadataToC(&dst.protobuf, fields, src) {
 		C.raft_conf_state_free(dst)
 		return false
 	}
@@ -157,31 +182,83 @@ func copyEntryToC(dst *C.raft_entry_t, src *pb.Entry) bool {
 	*dst = C.raft_entry_t{}
 	if src == nil {
 		dst.data.is_nil = cBool(true)
+		dst.protobuf.unknown_fields.is_nil = cBool(true)
 		return true
 	}
 	dst._type = C.raft_entry_type_t(src.GetType())
 	dst.term = C.uint64_t(src.GetTerm())
 	dst.index = C.uint64_t(src.GetIndex())
-	return copyBytesToC(&dst.data, src.Data)
+	var fields C.uint32_t
+	if src.Type != nil {
+		fields |= C.RAFT_ENTRY_PROTO_TYPE
+	}
+	if src.Term != nil {
+		fields |= C.RAFT_ENTRY_PROTO_TERM
+	}
+	if src.Index != nil {
+		fields |= C.RAFT_ENTRY_PROTO_INDEX
+	}
+	if !copyBytesToC(&dst.data, src.Data) ||
+		!copyProtobufMetadataToC(&dst.protobuf, fields, src) {
+		C.raft_entry_free(dst)
+		return false
+	}
+	return true
 }
 
 func copySnapshotToC(dst *C.raft_snapshot_t, src *pb.Snapshot) bool {
 	*dst = C.raft_snapshot_t{}
 	if src == nil {
 		dst.data.is_nil = cBool(true)
+		dst.protobuf.unknown_fields.is_nil = cBool(true)
+		dst.metadata.protobuf.unknown_fields.is_nil = cBool(true)
+		dst.metadata.conf_state.protobuf.unknown_fields.is_nil = cBool(true)
 		return true
 	}
 	if !copyBytesToC(&dst.data, src.Data) {
+		return false
+	}
+	var snapshotFields C.uint32_t
+	if src.Metadata != nil {
+		snapshotFields |= C.RAFT_SNAPSHOT_PROTO_METADATA
+	}
+	if !copyProtobufMetadataToC(
+		&dst.protobuf,
+		snapshotFields,
+		src,
+	) {
+		C.raft_snapshot_free(dst)
 		return false
 	}
 	metadata := src.GetMetadata()
 	if metadata != nil {
 		dst.metadata.index = C.uint64_t(metadata.GetIndex())
 		dst.metadata.term = C.uint64_t(metadata.GetTerm())
+		var metadataFields C.uint32_t
+		if metadata.ConfState != nil {
+			metadataFields |= C.RAFT_SNAPSHOT_METADATA_PROTO_CONF_STATE
+		}
+		if metadata.Index != nil {
+			metadataFields |= C.RAFT_SNAPSHOT_METADATA_PROTO_INDEX
+		}
+		if metadata.Term != nil {
+			metadataFields |= C.RAFT_SNAPSHOT_METADATA_PROTO_TERM
+		}
+		if !copyProtobufMetadataToC(
+			&dst.metadata.protobuf,
+			metadataFields,
+			metadata,
+		) {
+			C.raft_snapshot_free(dst)
+			return false
+		}
 		if !copyConfStateToC(&dst.metadata.conf_state, metadata.GetConfState()) {
 			C.raft_snapshot_free(dst)
 			return false
 		}
+	} else {
+		dst.metadata.protobuf.unknown_fields.is_nil = cBool(true)
+		dst.metadata.conf_state.protobuf.unknown_fields.is_nil = cBool(true)
 	}
 	return true
 }

@@ -989,6 +989,8 @@ int raft_tracker_conf_state_copy(const raft_progress_tracker_t *tracker,
         return result;
     }
     out->auto_leave = tracker->config.auto_leave;
+    out->protobuf.fields = RAFT_CONF_STATE_PROTO_AUTO_LEAVE;
+    out->protobuf.unknown_fields.is_nil = true;
     return RAFT_OK;
 }
 

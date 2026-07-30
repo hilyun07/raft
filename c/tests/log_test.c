@@ -45,12 +45,24 @@ static raft_entry_vec_t make_entries(uint64_t offset,
 }
 
 static int copy_entry(raft_entry_t *dst, const raft_entry_t *src) {
+    int result;
+
     memset(dst, 0, sizeof(*dst));
     dst->data.is_nil = true;
     dst->type = src->type;
     dst->term = src->term;
     dst->index = src->index;
-    return raft_bytes_copy(&dst->data, &src->data);
+    dst->protobuf.fields = src->protobuf.fields;
+    result = raft_bytes_copy(&dst->data, &src->data);
+    if (result == RAFT_OK) {
+        result = raft_bytes_copy(
+            &dst->protobuf.unknown_fields,
+            &src->protobuf.unknown_fields);
+    }
+    if (result != RAFT_OK) {
+        raft_entry_free(dst);
+    }
+    return result;
 }
 
 static uint64_t storage_first(const fake_storage_t *storage) {
@@ -538,6 +550,35 @@ static void test_storage_error_classification(void) {
     storage_free(&storage);
 }
 
+static void test_protobuf_entry_encoding_size(void) {
+    uint8_t unknown[] = {0xa0, 0x06, 0x07};
+    raft_entry_t entry = {
+        .type = RAFT_ENTRY_NORMAL,
+        .data = {NULL, 0, true},
+        .protobuf = {
+            .unknown_fields = {NULL, 0, true},
+        },
+    };
+
+    assert(raft_log_entry_encoding_size(&entry) == 0);
+    entry.protobuf.fields =
+        RAFT_ENTRY_PROTO_TYPE | RAFT_ENTRY_PROTO_TERM |
+        RAFT_ENTRY_PROTO_INDEX;
+    entry.data.is_nil = false;
+    entry.protobuf.unknown_fields =
+        (raft_bytes_t){unknown, sizeof(unknown), false};
+    // Three present-zero scalar fields, present-empty Data, and three raw
+    // unknown bytes.
+    assert(raft_log_entry_encoding_size(&entry) == 11);
+
+    entry.protobuf.fields = 0;
+    entry.protobuf.unknown_fields =
+        (raft_bytes_t){NULL, 0, true};
+    entry.data.is_nil = true;
+    entry.term = 128;
+    assert(raft_log_entry_encoding_size(&entry) == 3);
+}
+
 int main(void) {
     test_constructor_indexes_terms_and_snapshot();
     test_slice_across_storage_and_unstable();
@@ -545,5 +586,6 @@ int main(void) {
     test_commit_apply_and_ready_progress();
     test_restore_snapshot_and_errors();
     test_storage_error_classification();
+    test_protobuf_entry_encoding_size();
     return 0;
 }

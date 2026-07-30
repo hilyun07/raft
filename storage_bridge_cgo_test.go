@@ -272,6 +272,109 @@ func TestCGoStorageSnapshotCallbackCopiesAndPreservesNil(t *testing.T) {
 	}
 }
 
+func TestCGoStorageCallbacksPreserveProtobufMetadata(t *testing.T) {
+	t.Run("initial-conf-state", func(t *testing.T) {
+		confState := &pb.ConfState{Voters: []uint64{1}}
+		protobufFidelitySetUnknown(
+			confState,
+			protobufFidelityUnknown(0xa0, 21),
+		)
+		storage := &callbackTestStorage{
+			initialState: func() (*pb.HardState, *pb.ConfState, error) {
+				return &pb.HardState{}, confState, nil
+			},
+		}
+		handle, _ := newStorageCallbackHandle(storage)
+		defer handle.Delete()
+
+		result := callStorageInitialState(handle)
+		defer result.free()
+		if err := storageCallbackError(result.code); err != nil {
+			t.Fatal(err)
+		}
+		_, got := result.values()
+		requireProtobufFidelityEqual(t, confState, got)
+	})
+
+	t.Run("entries", func(t *testing.T) {
+		normal := pb.EntryNormal
+		entries := []*pb.Entry{
+			{Data: nil},
+			{Type: &normal, Data: []byte{}},
+		}
+		protobufFidelitySetUnknown(
+			entries[0],
+			protobufFidelityUnknown(0xa8, 22),
+		)
+		protobufFidelitySetUnknown(
+			entries[1],
+			protobufFidelityUnknown(0xb0, 23),
+		)
+		storage := &callbackTestStorage{
+			entries: func(uint64, uint64, uint64) ([]*pb.Entry, error) {
+				return entries, nil
+			},
+		}
+		handle, _ := newStorageCallbackHandle(storage)
+		defer handle.Delete()
+
+		result := callStorageEntries(handle, 1, 3, 1024)
+		defer result.free()
+		if err := storageCallbackError(result.code); err != nil {
+			t.Fatal(err)
+		}
+		got := result.values()
+		if len(got) != len(entries) {
+			t.Fatalf("Entries length = %d, want %d", len(got), len(entries))
+		}
+		for i := range entries {
+			requireProtobufFidelityEqual(t, entries[i], got[i])
+		}
+	})
+
+	t.Run("snapshot-and-nested-metadata", func(t *testing.T) {
+		autoLeave := false
+		confState := &pb.ConfState{
+			Voters:    []uint64{1, 2},
+			AutoLeave: &autoLeave,
+		}
+		protobufFidelitySetUnknown(
+			confState,
+			protobufFidelityUnknown(0xb8, 24),
+		)
+		metadata := &pb.SnapshotMetadata{
+			ConfState: confState,
+			Index:     new(uint64(8)),
+			Term:      new(uint64(6)),
+		}
+		protobufFidelitySetUnknown(
+			metadata,
+			protobufFidelityUnknown(0xc0, 25),
+		)
+		snapshot := &pb.Snapshot{
+			Data:     []byte{},
+			Metadata: metadata,
+		}
+		protobufFidelitySetUnknown(
+			snapshot,
+			protobufFidelityUnknown(0xc8, 26),
+		)
+		storage := &callbackTestStorage{
+			snapshot: func() (*pb.Snapshot, error) { return snapshot, nil },
+		}
+		handle, _ := newStorageCallbackHandle(storage)
+		defer handle.Delete()
+
+		result := callStorageSnapshot(handle)
+		if err := storageCallbackError(result.code); err != nil {
+			t.Fatal(err)
+		}
+		got := result.value()
+		result.free()
+		requireProtobufFidelityEqual(t, snapshot, got)
+	})
+}
+
 func TestCGoStorageCallbackErrorAndPanicMapping(t *testing.T) {
 	var termErr error
 	var snapshotErr error

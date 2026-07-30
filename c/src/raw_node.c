@@ -107,6 +107,7 @@ static bool public_conf_change_v2_valid(
 
     if (conf_change == NULL ||
         !raft_byte_view_valid(&conf_change->context) ||
+        !raft_byte_view_valid(&conf_change->unknown_fields) ||
         !conf_change_transition_valid(conf_change->transition)) {
         return false;
     }
@@ -116,6 +117,7 @@ static bool public_conf_change_v2_valid(
     for (i = 0; i < conf_change->changes_len; ++i) {
         const raft_conf_change_single_t *change = &conf_change->changes[i];
         if (!conf_change_type_valid(change->type) ||
+            !raft_byte_view_valid(&change->unknown_fields) ||
             (change->node_id != RAFT_NONE &&
              !raft_is_valid_node_id(change->node_id))) {
             return false;
@@ -128,6 +130,7 @@ static bool public_conf_change_v1_valid(
     const raft_conf_change_view_t *conf_change) {
     return conf_change != NULL &&
            raft_byte_view_valid(&conf_change->context) &&
+           raft_byte_view_valid(&conf_change->unknown_fields) &&
            conf_change_type_valid(conf_change->type) &&
            (conf_change->node_id == RAFT_NONE ||
             raft_is_valid_node_id(conf_change->node_id));
@@ -170,12 +173,30 @@ static bool uint64_vec_valid(const raft_uint64_vec_t *vec) {
     return vec != NULL && array_shape_valid(vec->items, vec->len);
 }
 
+static bool protobuf_metadata_view_valid(
+    const raft_protobuf_metadata_view_t *metadata,
+    uint32_t allowed_fields) {
+    return metadata != NULL &&
+           (metadata->fields & ~allowed_fields) == 0 &&
+           raft_byte_view_valid(&metadata->unknown_fields);
+}
+
+static bool protobuf_metadata_valid(
+    const raft_protobuf_metadata_t *metadata,
+    uint32_t allowed_fields) {
+    return metadata != NULL &&
+           (metadata->fields & ~allowed_fields) == 0 &&
+           raft_bytes_valid(&metadata->unknown_fields);
+}
+
 static bool conf_state_view_valid(const raft_conf_state_view_t *state) {
     return state != NULL &&
            uint64_view_valid(&state->voters) &&
            uint64_view_valid(&state->voters_outgoing) &&
            uint64_view_valid(&state->learners) &&
-           uint64_view_valid(&state->learners_next);
+           uint64_view_valid(&state->learners_next) &&
+           protobuf_metadata_view_valid(
+               &state->protobuf, RAFT_CONF_STATE_PROTO_AUTO_LEAVE);
 }
 
 static bool conf_state_valid(const raft_conf_state_t *state) {
@@ -183,29 +204,53 @@ static bool conf_state_valid(const raft_conf_state_t *state) {
            uint64_vec_valid(&state->voters) &&
            uint64_vec_valid(&state->voters_outgoing) &&
            uint64_vec_valid(&state->learners) &&
-           uint64_vec_valid(&state->learners_next);
+           uint64_vec_valid(&state->learners_next) &&
+           protobuf_metadata_valid(
+               &state->protobuf, RAFT_CONF_STATE_PROTO_AUTO_LEAVE);
 }
 
 bool raft_entry_view_valid(const raft_entry_view_t *entry) {
     return entry != NULL && entry_type_valid(entry->type) &&
-           raft_byte_view_valid(&entry->data);
+           raft_byte_view_valid(&entry->data) &&
+           protobuf_metadata_view_valid(
+               &entry->protobuf,
+               RAFT_ENTRY_PROTO_TYPE | RAFT_ENTRY_PROTO_TERM |
+                   RAFT_ENTRY_PROTO_INDEX);
 }
 
 bool raft_entry_valid(const raft_entry_t *entry) {
     return entry != NULL && entry_type_valid(entry->type) &&
-           raft_bytes_valid(&entry->data);
+           raft_bytes_valid(&entry->data) &&
+           protobuf_metadata_valid(
+               &entry->protobuf,
+               RAFT_ENTRY_PROTO_TYPE | RAFT_ENTRY_PROTO_TERM |
+                   RAFT_ENTRY_PROTO_INDEX);
 }
 
 bool raft_snapshot_view_valid(const raft_snapshot_view_t *snapshot) {
     return snapshot != NULL &&
            raft_byte_view_valid(&snapshot->data) &&
-           conf_state_view_valid(&snapshot->metadata.conf_state);
+           conf_state_view_valid(&snapshot->metadata.conf_state) &&
+           protobuf_metadata_view_valid(
+               &snapshot->metadata.protobuf,
+               RAFT_SNAPSHOT_METADATA_PROTO_CONF_STATE |
+                   RAFT_SNAPSHOT_METADATA_PROTO_INDEX |
+                   RAFT_SNAPSHOT_METADATA_PROTO_TERM) &&
+           protobuf_metadata_view_valid(
+               &snapshot->protobuf, RAFT_SNAPSHOT_PROTO_METADATA);
 }
 
 bool raft_snapshot_valid(const raft_snapshot_t *snapshot) {
     return snapshot != NULL &&
            raft_bytes_valid(&snapshot->data) &&
-           conf_state_valid(&snapshot->metadata.conf_state);
+           conf_state_valid(&snapshot->metadata.conf_state) &&
+           protobuf_metadata_valid(
+               &snapshot->metadata.protobuf,
+               RAFT_SNAPSHOT_METADATA_PROTO_CONF_STATE |
+                   RAFT_SNAPSHOT_METADATA_PROTO_INDEX |
+                   RAFT_SNAPSHOT_METADATA_PROTO_TERM) &&
+           protobuf_metadata_valid(
+               &snapshot->protobuf, RAFT_SNAPSHOT_PROTO_METADATA);
 }
 
 bool raft_message_view_valid(const raft_message_view_t *message) {
@@ -213,6 +258,15 @@ bool raft_message_view_valid(const raft_message_view_t *message) {
 
     if (message == NULL || !message_type_valid(message->type) ||
         !raft_byte_view_valid(&message->context) ||
+        !protobuf_metadata_view_valid(
+            &message->protobuf,
+            RAFT_MESSAGE_PROTO_TYPE | RAFT_MESSAGE_PROTO_TO |
+                RAFT_MESSAGE_PROTO_FROM | RAFT_MESSAGE_PROTO_TERM |
+                RAFT_MESSAGE_PROTO_LOG_TERM |
+                RAFT_MESSAGE_PROTO_INDEX |
+                RAFT_MESSAGE_PROTO_COMMIT | RAFT_MESSAGE_PROTO_VOTE |
+                RAFT_MESSAGE_PROTO_REJECT |
+                RAFT_MESSAGE_PROTO_REJECT_HINT) ||
         !array_shape_valid(message->entries.items, message->entries.len) ||
         !array_shape_valid(message->responses.items, message->responses.len)) {
         return false;
@@ -239,6 +293,15 @@ bool raft_message_valid(const raft_message_t *message) {
 
     if (message == NULL || !message_type_valid(message->type) ||
         !raft_bytes_valid(&message->context) ||
+        !protobuf_metadata_valid(
+            &message->protobuf,
+            RAFT_MESSAGE_PROTO_TYPE | RAFT_MESSAGE_PROTO_TO |
+                RAFT_MESSAGE_PROTO_FROM | RAFT_MESSAGE_PROTO_TERM |
+                RAFT_MESSAGE_PROTO_LOG_TERM |
+                RAFT_MESSAGE_PROTO_INDEX |
+                RAFT_MESSAGE_PROTO_COMMIT | RAFT_MESSAGE_PROTO_VOTE |
+                RAFT_MESSAGE_PROTO_REJECT |
+                RAFT_MESSAGE_PROTO_REJECT_HINT) ||
         !array_shape_valid(message->entries.items, message->entries.len) ||
         !array_shape_valid(message->responses.items, message->responses.len)) {
         return false;
@@ -317,6 +380,25 @@ int raft_bytes_copy(raft_bytes_t *dst, const raft_bytes_t *src) {
     return raft_bytes_copy_from_view(dst, &view);
 }
 
+static int protobuf_metadata_copy_from_view(
+    raft_protobuf_metadata_t *dst,
+    const raft_protobuf_metadata_view_t *src) {
+    int result;
+
+    if (dst == NULL || src == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    memset(dst, 0, sizeof(*dst));
+    dst->unknown_fields.is_nil = true;
+    dst->fields = src->fields;
+    result = raft_bytes_copy_from_view(
+        &dst->unknown_fields, &src->unknown_fields);
+    if (result != RAFT_OK) {
+        memset(dst, 0, sizeof(*dst));
+        dst->unknown_fields.is_nil = true;
+    }
+    return result;
+}
 
 static int uint64_vec_copy_from_view(raft_uint64_vec_t *dst,
                                      const raft_uint64_view_t *src) {
@@ -372,6 +454,11 @@ static int conf_state_copy_from_view(raft_conf_state_t *dst,
         goto fail;
     }
     dst->auto_leave = src->auto_leave;
+    result = protobuf_metadata_copy_from_view(
+        &dst->protobuf, &src->protobuf);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
     return RAFT_OK;
 
 fail:
@@ -394,6 +481,10 @@ int raft_entry_copy_from_view(raft_entry_t *dst,
     dst->term = src->term;
     dst->index = src->index;
     result = raft_bytes_copy_from_view(&dst->data, &src->data);
+    if (result == RAFT_OK) {
+        result = protobuf_metadata_copy_from_view(
+            &dst->protobuf, &src->protobuf);
+    }
     if (result != RAFT_OK) {
         raft_entry_free(dst);
     }
@@ -422,6 +513,16 @@ int raft_snapshot_copy_from_view(raft_snapshot_t *dst,
     }
     dst->metadata.index = src->metadata.index;
     dst->metadata.term = src->metadata.term;
+    result = protobuf_metadata_copy_from_view(
+        &dst->metadata.protobuf, &src->metadata.protobuf);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
+    result = protobuf_metadata_copy_from_view(
+        &dst->protobuf, &src->protobuf);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
     return RAFT_OK;
 
 fail:
@@ -483,6 +584,11 @@ int raft_message_copy_from_view(raft_message_t *dst,
     dst->reject = src->reject;
     dst->reject_hint = src->reject_hint;
 
+    result = protobuf_metadata_copy_from_view(
+        &dst->protobuf, &src->protobuf);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
     result = raft_bytes_copy_from_view(&dst->context, &src->context);
     if (result != RAFT_OK) {
         goto fail;
@@ -541,11 +647,20 @@ void raft_uint64_vec_free(raft_uint64_vec_t *vec) {
     memset(vec, 0, sizeof(*vec));
 }
 
+static void protobuf_metadata_free(raft_protobuf_metadata_t *metadata) {
+    if (metadata == NULL) {
+        return;
+    }
+    raft_bytes_free(&metadata->unknown_fields);
+    memset(metadata, 0, sizeof(*metadata));
+}
+
 void raft_entry_free(raft_entry_t *entry) {
     if (entry == NULL) {
         return;
     }
     raft_bytes_free(&entry->data);
+    protobuf_metadata_free(&entry->protobuf);
     memset(entry, 0, sizeof(*entry));
 }
 
@@ -577,6 +692,7 @@ void raft_conf_state_free(raft_conf_state_t *conf_state) {
     raft_uint64_vec_free(&conf_state->voters_outgoing);
     raft_uint64_vec_free(&conf_state->learners);
     raft_uint64_vec_free(&conf_state->learners_next);
+    protobuf_metadata_free(&conf_state->protobuf);
     memset(conf_state, 0, sizeof(*conf_state));
 }
 
@@ -586,6 +702,8 @@ void raft_snapshot_free(raft_snapshot_t *snapshot) {
     }
     raft_bytes_free(&snapshot->data);
     raft_conf_state_free(&snapshot->metadata.conf_state);
+    protobuf_metadata_free(&snapshot->metadata.protobuf);
+    protobuf_metadata_free(&snapshot->protobuf);
     memset(snapshot, 0, sizeof(*snapshot));
 }
 
@@ -597,6 +715,7 @@ void raft_message_free(raft_message_t *message) {
     raft_snapshot_free(&message->snapshot);
     raft_bytes_free(&message->context);
     raft_message_vec_free(&message->responses);
+    protobuf_metadata_free(&message->protobuf);
     memset(message, 0, sizeof(*message));
 }
 
@@ -719,6 +838,7 @@ static void raw_message_init(raft_message_t *message,
                              raft_message_type_t type) {
     memset(message, 0, sizeof(*message));
     message->type = type;
+    message->protobuf.fields = RAFT_MESSAGE_PROTO_TYPE;
     message->context.is_nil = true;
     message->snapshot.data.is_nil = true;
 }
@@ -777,6 +897,17 @@ static int raw_entry_vec_copy(raft_entry_vec_t *dst,
                 .len = src->items[i].data.len,
                 .is_nil = src->items[i].data.is_nil,
             },
+            .protobuf = {
+                .fields = src->items[i].protobuf.fields,
+                .unknown_fields = {
+                    .data =
+                        src->items[i].protobuf.unknown_fields.data,
+                    .len =
+                        src->items[i].protobuf.unknown_fields.len,
+                    .is_nil =
+                        src->items[i].protobuf.unknown_fields.is_nil,
+                },
+            },
         };
         int result =
             raft_entry_copy_from_view(&dst->items[i], &view);
@@ -819,6 +950,29 @@ static int raw_snapshot_copy(raft_snapshot_t *dst,
         src->metadata.conf_state.learners_next.len;
     view.metadata.conf_state.auto_leave =
         src->metadata.conf_state.auto_leave;
+    view.metadata.conf_state.protobuf.fields =
+        src->metadata.conf_state.protobuf.fields;
+    view.metadata.conf_state.protobuf.unknown_fields.data =
+        src->metadata.conf_state.protobuf.unknown_fields.data;
+    view.metadata.conf_state.protobuf.unknown_fields.len =
+        src->metadata.conf_state.protobuf.unknown_fields.len;
+    view.metadata.conf_state.protobuf.unknown_fields.is_nil =
+        src->metadata.conf_state.protobuf.unknown_fields.is_nil;
+    view.metadata.protobuf.fields =
+        src->metadata.protobuf.fields;
+    view.metadata.protobuf.unknown_fields.data =
+        src->metadata.protobuf.unknown_fields.data;
+    view.metadata.protobuf.unknown_fields.len =
+        src->metadata.protobuf.unknown_fields.len;
+    view.metadata.protobuf.unknown_fields.is_nil =
+        src->metadata.protobuf.unknown_fields.is_nil;
+    view.protobuf.fields = src->protobuf.fields;
+    view.protobuf.unknown_fields.data =
+        src->protobuf.unknown_fields.data;
+    view.protobuf.unknown_fields.len =
+        src->protobuf.unknown_fields.len;
+    view.protobuf.unknown_fields.is_nil =
+        src->protobuf.unknown_fields.is_nil;
     return raft_snapshot_copy_from_view(dst, &view);
 }
 
@@ -832,6 +986,9 @@ static int raw_new_storage_append_response(
     response->to = raw_node->raft.id;
     response->from = RAFT_LOCAL_APPEND_THREAD;
     response->term = raw_node->raft.term;
+    response->protobuf.fields |=
+        RAFT_MESSAGE_PROTO_TO | RAFT_MESSAGE_PROTO_FROM |
+        RAFT_MESSAGE_PROTO_TERM;
     if (raft_log_has_next_or_in_progress_unstable_entries(
             &raw_node->log)) {
         result = raft_log_last_index(
@@ -844,6 +1001,9 @@ static int raw_new_storage_append_response(
             raft_message_free(response);
             return result;
         }
+        response->protobuf.fields |=
+            RAFT_MESSAGE_PROTO_INDEX |
+            RAFT_MESSAGE_PROTO_LOG_TERM;
     }
     if (ready->has_snapshot) {
         response->has_snapshot = true;
@@ -875,6 +1035,8 @@ static int raw_new_storage_append(
     raw_message_init(message, RAFT_MSG_STORAGE_APPEND);
     message->to = RAFT_LOCAL_APPEND_THREAD;
     message->from = raw_node->raft.id;
+    message->protobuf.fields |=
+        RAFT_MESSAGE_PROTO_TO | RAFT_MESSAGE_PROTO_FROM;
     result = raw_entry_vec_copy(
         &message->entries, &ready->entries);
     if (result != RAFT_OK) {
@@ -884,6 +1046,9 @@ static int raw_new_storage_append(
         message->term = ready->hard_state.term;
         message->vote = ready->hard_state.vote;
         message->commit = ready->hard_state.commit;
+        message->protobuf.fields |=
+            RAFT_MESSAGE_PROTO_TERM | RAFT_MESSAGE_PROTO_VOTE |
+            RAFT_MESSAGE_PROTO_COMMIT;
     }
     if (ready->has_snapshot) {
         message->has_snapshot = true;
@@ -928,6 +1093,10 @@ static int raw_new_storage_apply(
     raw_message_init(message, RAFT_MSG_STORAGE_APPLY);
     message->to = RAFT_LOCAL_APPLY_THREAD;
     message->from = raw_node->raft.id;
+    message->term = 0;
+    message->protobuf.fields |=
+        RAFT_MESSAGE_PROTO_TO | RAFT_MESSAGE_PROTO_FROM |
+        RAFT_MESSAGE_PROTO_TERM;
     result = raw_entry_vec_copy(
         &message->entries, &ready->committed_entries);
     if (result != RAFT_OK) {
@@ -936,6 +1105,10 @@ static int raw_new_storage_apply(
     raw_message_init(&response, RAFT_MSG_STORAGE_APPLY_RESP);
     response.to = raw_node->raft.id;
     response.from = RAFT_LOCAL_APPLY_THREAD;
+    response.term = 0;
+    response.protobuf.fields |=
+        RAFT_MESSAGE_PROTO_TO | RAFT_MESSAGE_PROTO_FROM |
+        RAFT_MESSAGE_PROTO_TERM;
     result = raw_entry_vec_copy(
         &response.entries, &ready->committed_entries);
     if (result != RAFT_OK) {
@@ -1401,6 +1574,10 @@ static int raw_capture_steps_on_advance(
             &response, RAFT_MSG_STORAGE_APPLY_RESP);
         response.to = raw_node->raft.id;
         response.from = RAFT_LOCAL_APPLY_THREAD;
+        response.term = 0;
+        response.protobuf.fields |=
+            RAFT_MESSAGE_PROTO_TO | RAFT_MESSAGE_PROTO_FROM |
+            RAFT_MESSAGE_PROTO_TERM;
         result = raw_entry_vec_copy(
             &response.entries, &ready->committed_entries);
         if (result != RAFT_OK) {
@@ -1563,6 +1740,17 @@ static int raw_step_after_append_message(
                 message->entries.items[i].data.len;
             entries[i].data.is_nil =
                 message->entries.items[i].data.is_nil;
+            entries[i].protobuf.fields =
+                message->entries.items[i].protobuf.fields;
+            entries[i].protobuf.unknown_fields.data =
+                message->entries.items[i]
+                    .protobuf.unknown_fields.data;
+            entries[i].protobuf.unknown_fields.len =
+                message->entries.items[i]
+                    .protobuf.unknown_fields.len;
+            entries[i].protobuf.unknown_fields.is_nil =
+                message->entries.items[i]
+                    .protobuf.unknown_fields.is_nil;
         }
     }
     memset(&view, 0, sizeof(view));
@@ -1576,6 +1764,13 @@ static int raw_step_after_append_message(
     view.vote = message->vote;
     view.reject = message->reject;
     view.reject_hint = message->reject_hint;
+    view.protobuf.fields = message->protobuf.fields;
+    view.protobuf.unknown_fields.data =
+        message->protobuf.unknown_fields.data;
+    view.protobuf.unknown_fields.len =
+        message->protobuf.unknown_fields.len;
+    view.protobuf.unknown_fields.is_nil =
+        message->protobuf.unknown_fields.is_nil;
     view.entries.items = entries;
     view.entries.len = message->entries.len;
     view.has_snapshot = message->has_snapshot;
@@ -1610,6 +1805,36 @@ static int raw_step_after_append_message(
                 .learners_next.len;
         view.snapshot.metadata.conf_state.auto_leave =
             message->snapshot.metadata.conf_state.auto_leave;
+        view.snapshot.metadata.conf_state.protobuf.fields =
+            message->snapshot.metadata.conf_state.protobuf.fields;
+        view.snapshot.metadata.conf_state.protobuf
+            .unknown_fields.data =
+            message->snapshot.metadata.conf_state.protobuf
+                .unknown_fields.data;
+        view.snapshot.metadata.conf_state.protobuf
+            .unknown_fields.len =
+            message->snapshot.metadata.conf_state.protobuf
+                .unknown_fields.len;
+        view.snapshot.metadata.conf_state.protobuf
+            .unknown_fields.is_nil =
+            message->snapshot.metadata.conf_state.protobuf
+                .unknown_fields.is_nil;
+        view.snapshot.metadata.protobuf.fields =
+            message->snapshot.metadata.protobuf.fields;
+        view.snapshot.metadata.protobuf.unknown_fields.data =
+            message->snapshot.metadata.protobuf.unknown_fields.data;
+        view.snapshot.metadata.protobuf.unknown_fields.len =
+            message->snapshot.metadata.protobuf.unknown_fields.len;
+        view.snapshot.metadata.protobuf.unknown_fields.is_nil =
+            message->snapshot.metadata.protobuf.unknown_fields.is_nil;
+        view.snapshot.protobuf.fields =
+            message->snapshot.protobuf.fields;
+        view.snapshot.protobuf.unknown_fields.data =
+            message->snapshot.protobuf.unknown_fields.data;
+        view.snapshot.protobuf.unknown_fields.len =
+            message->snapshot.protobuf.unknown_fields.len;
+        view.snapshot.protobuf.unknown_fields.is_nil =
+            message->snapshot.protobuf.unknown_fields.is_nil;
     } else {
         view.snapshot.data.is_nil = true;
     }
