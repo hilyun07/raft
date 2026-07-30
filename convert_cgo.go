@@ -514,6 +514,23 @@ func cProgress(src *C.raft_progress_t) tracker.Progress {
 	}
 }
 
+func cStatusProgress(src *C.raft_status_progress_t) tracker.Progress {
+	progress := cProgress(&src.snapshot.progress)
+	inflights := tracker.NewInflights(
+		checkedCLen(src.inflights.size),
+		uint64(src.inflights.max_bytes),
+	)
+	items := unsafe.Slice(
+		src.inflights.items,
+		checkedCLen(src.inflights.len),
+	)
+	for i := range items {
+		inflights.Add(uint64(items[i].index), uint64(items[i].bytes))
+	}
+	progress.Inflights = inflights
+	return progress
+}
+
 func cProgressType(src C.raft_progress_type_t) (ProgressType, error) {
 	switch int(src) {
 	case int(C.RAFT_PROGRESS_PEER):

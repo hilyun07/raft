@@ -144,6 +144,12 @@ int raft_tracker_conf_state_copy(const raft_progress_tracker_t *tracker,
 int raft_tracker_progress_snapshot(const raft_progress_tracker_t *tracker,
                                    raft_progress_snapshot_t **out,
                                    size_t *out_len);
+int raft_tracker_status_progress_snapshot(
+    const raft_progress_tracker_t *tracker,
+    raft_status_progress_t **out,
+    size_t *out_len);
+void raft_tracker_status_progress_snapshot_free(
+    raft_status_progress_t *snapshots, size_t len);
 
 bool raft_id_vec_contains(const raft_uint64_vec_t *vec, uint64_t id);
 int raft_id_vec_insert(raft_uint64_vec_t *vec, uint64_t id);

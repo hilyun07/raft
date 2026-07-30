@@ -2714,6 +2714,17 @@ int raft_core_progress_snapshot(const raft_t *raft,
         &raft->tracker, out, out_len);
 }
 
+int raft_core_status_progress_snapshot(
+    const raft_t *raft,
+    raft_status_progress_t **out,
+    size_t *out_len) {
+    if (raft == NULL || out == NULL || out_len == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    return raft_tracker_status_progress_snapshot(
+        &raft->tracker, out, out_len);
+}
+
 int raft_core_conf_state_copy(const raft_t *raft, raft_conf_state_t *out) {
     if (raft == NULL || out == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;

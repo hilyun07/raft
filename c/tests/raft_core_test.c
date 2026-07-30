@@ -201,6 +201,19 @@ static raft_progress_t progress_for(raft_raw_node_t *node, uint64_t id) {
     return progress;
 }
 
+static const raft_status_progress_t *status_progress_for(
+    const raft_status_t *status, uint64_t id) {
+    size_t i;
+
+    for (i = 0; i < status->progress_len; ++i) {
+        if (status->progress[i].snapshot.id == id) {
+            return &status->progress[i];
+        }
+    }
+    assert(0 && "status progress not found");
+    return NULL;
+}
+
 static int step_owned(raft_raw_node_t *node,
                       const raft_message_t *message,
                       bool public_step) {
@@ -1396,6 +1409,115 @@ static void test_uncommitted_proposal_limit(void) {
     raft_raw_node_destroy(node);
 }
 
+static void test_status_progress_inflights(void) {
+    const uint64_t voters[] = {1, 2};
+    const uint8_t first_byte = 'a';
+    const uint8_t second_byte = 'b';
+    const raft_byte_view_t first_proposal = {
+        .data = &first_byte,
+        .len = 1,
+        .is_nil = false,
+    };
+    const raft_byte_view_t second_proposal = {
+        .data = &second_byte,
+        .len = 1,
+        .is_nil = false,
+    };
+    test_storage_t storage = {
+        .hard_state = {.term = 1, .commit = 1},
+        .voters = voters,
+        .voter_count = 2,
+        .last_index = 1,
+        .last_term = 1,
+    };
+    raft_config_t cfg = config(1);
+    raft_raw_node_t *node;
+    raft_status_t before = {0};
+    raft_status_t after = {0};
+    const raft_status_progress_t *peer;
+    raft_progress_internal_t *live_peer;
+    const raft_message_view_t vote_response = {
+        .type = RAFT_MSG_VOTE_RESP,
+        .to = 1,
+        .from = 2,
+        .term = 2,
+        .context = {NULL, 0, true},
+    };
+    const raft_message_view_t caught_up = {
+        .type = RAFT_MSG_APP_RESP,
+        .to = 1,
+        .from = 2,
+        .term = 2,
+        .index = 2,
+        .context = {NULL, 0, true},
+    };
+    const raft_message_view_t acknowledge_first = {
+        .type = RAFT_MSG_APP_RESP,
+        .to = 1,
+        .from = 2,
+        .term = 2,
+        .index = 3,
+        .context = {NULL, 0, true},
+    };
+
+    cfg.applied = 1;
+    cfg.max_size_per_message = 1;
+    cfg.max_inflight_messages = 2;
+    cfg.max_inflight_bytes = 4;
+    node = new_node_with_config(cfg, &storage);
+
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    assert(raft_raw_node_step(node, &vote_response) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    assert(raft_raw_node_step(node, &caught_up) == RAFT_OK);
+    accept_and_advance(node, &storage);
+
+    assert(raft_raw_node_propose(node, &first_proposal) == RAFT_OK);
+    assert(raft_raw_node_propose(node, &second_proposal) == RAFT_OK);
+    live_peer = raft_tracker_find(&node->raft.tracker, 2);
+    assert(live_peer != NULL);
+    assert(live_peer->state == RAFT_PROGRESS_STATE_REPLICATE);
+    assert(live_peer->inflights.count == 2);
+
+    assert(raft_raw_node_status(node, &before) == RAFT_OK);
+    peer = status_progress_for(&before, 2);
+    assert(peer->snapshot.type == RAFT_PROGRESS_PEER);
+    assert(peer->snapshot.progress.state ==
+           RAFT_PROGRESS_STATE_REPLICATE);
+    assert(peer->snapshot.progress.message_flow_paused);
+    assert(peer->inflights.size == 2);
+    assert(peer->inflights.max_bytes == 4);
+    assert(peer->inflights.len == 2);
+    assert(peer->inflights.items != NULL);
+    assert(peer->inflights.items[0].index == 3);
+    assert(peer->inflights.items[0].bytes == 1);
+    assert(peer->inflights.items[1].index == 4);
+    assert(peer->inflights.items[1].bytes == 1);
+    assert(live_peer->inflights.count == 2);
+
+    assert(raft_raw_node_step(node, &acknowledge_first) == RAFT_OK);
+    assert(raft_raw_node_status(node, &after) == RAFT_OK);
+    peer = status_progress_for(&after, 2);
+    assert(peer->snapshot.progress.match_index == 3);
+    assert(peer->snapshot.progress.next_index == 5);
+    assert(!peer->snapshot.progress.message_flow_paused);
+    assert(peer->inflights.size == 2);
+    assert(peer->inflights.max_bytes == 4);
+    assert(peer->inflights.len == 1);
+    assert(peer->inflights.items != NULL);
+    assert(peer->inflights.items[0].index == 4);
+    assert(peer->inflights.items[0].bytes == 1);
+
+    // The earlier status remains an independent point-in-time copy.
+    peer = status_progress_for(&before, 2);
+    assert(peer->inflights.len == 2);
+    assert(peer->inflights.items[0].index == 3);
+    raft_status_free(&after);
+    raft_status_free(&before);
+    raft_raw_node_destroy(node);
+}
+
 static void test_report_unreachable_paths(void) {
     const uint64_t voters[] = {1, 2, 3};
     const uint8_t byte = 1;
@@ -1622,6 +1744,7 @@ int main(void) {
     test_safe_read_index_and_stepdown();
     test_lease_read_and_check_quorum();
     test_uncommitted_proposal_limit();
+    test_status_progress_inflights();
     test_report_unreachable_paths();
     test_async_storage_write_protocol();
     return 0;

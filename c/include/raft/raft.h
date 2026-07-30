@@ -405,6 +405,29 @@ typedef struct raft_progress_snapshot {
     raft_progress_t progress;
 } raft_progress_snapshot_t;
 
+typedef struct raft_inflight_snapshot {
+    uint64_t index;
+    uint64_t bytes;
+} raft_inflight_snapshot_t;
+
+// C-owned logical copy of an inflight window. items contains only active
+// records, ordered from oldest to newest. size and max_bytes retain the
+// configured limits needed to reconstruct equivalent tracker.Inflights state.
+typedef struct raft_inflights_snapshot {
+    raft_inflight_snapshot_t *items;
+    size_t len;
+    size_t size;
+    uint64_t max_bytes;
+} raft_inflights_snapshot_t;
+
+// Status uses a full progress copy, including an owned inflight snapshot.
+// RawNode.WithProgress continues to use the scalar-only
+// raft_progress_snapshot_t above.
+typedef struct raft_status_progress {
+    raft_progress_snapshot_t snapshot;
+    raft_inflights_snapshot_t inflights;
+} raft_status_progress_t;
+
 typedef struct raft_basic_status {
     uint64_t id;
     raft_hard_state_t hard_state;
@@ -419,7 +442,7 @@ typedef struct raft_status {
     // Matching Go Status, progress is populated only for leaders. Use
     // raft_raw_node_progress_snapshot for role-independent WithProgress
     // semantics.
-    raft_progress_snapshot_t *progress;
+    raft_status_progress_t *progress;
     size_t progress_len;
 } raft_status_t;
 

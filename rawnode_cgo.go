@@ -405,7 +405,8 @@ func (rn *RawNode) Status() Status {
 			out.Progress = make(map[uint64]tracker.Progress, n)
 		}
 		for i := range rows {
-			out.Progress[uint64(rows[i].id)] = cProgress(&rows[i].progress)
+			out.Progress[uint64(rows[i].snapshot.id)] =
+				cStatusProgress(&rows[i])
 		}
 	}
 	return out

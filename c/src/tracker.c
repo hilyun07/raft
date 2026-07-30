@@ -935,6 +935,56 @@ int raft_tracker_conf_state_copy(const raft_progress_tracker_t *tracker,
     return RAFT_OK;
 }
 
+static void tracker_progress_snapshot_copy(
+    raft_progress_snapshot_t *dst,
+    const raft_progress_internal_t *src) {
+    dst->id = src->id;
+    dst->type = src->is_learner
+                    ? RAFT_PROGRESS_LEARNER
+                    : RAFT_PROGRESS_PEER;
+    dst->progress.match_index = src->match_index;
+    dst->progress.next_index = src->next_index;
+    dst->progress.state = src->state;
+    dst->progress.pending_snapshot = src->pending_snapshot;
+    dst->progress.recent_active = src->recent_active;
+    dst->progress.message_flow_paused =
+        src->message_flow_paused;
+    dst->progress.is_learner = src->is_learner;
+}
+
+static int tracker_inflights_snapshot_copy(
+    raft_inflights_snapshot_t *dst,
+    const raft_inflights_internal_t *src) {
+    size_t i;
+
+    if (dst == NULL || src == NULL || src->size == 0 ||
+        src->capacity > src->size || src->count > src->capacity ||
+        !tracker_array_valid(src->buffer, src->capacity)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    memset(dst, 0, sizeof(*dst));
+    dst->size = src->size;
+    dst->max_bytes = src->max_bytes;
+    if (src->count == 0) {
+        return RAFT_OK;
+    }
+    if (src->count > SIZE_MAX / sizeof(*dst->items)) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    dst->items = calloc(src->count, sizeof(*dst->items));
+    if (dst->items == NULL) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    dst->len = src->count;
+    for (i = 0; i < src->count; ++i) {
+        const raft_inflight_internal_t *item =
+            &src->buffer[(src->start + i) % src->capacity];
+        dst->items[i].index = item->index;
+        dst->items[i].bytes = item->bytes;
+    }
+    return RAFT_OK;
+}
+
 int raft_tracker_progress_snapshot(const raft_progress_tracker_t *tracker,
                                    raft_progress_snapshot_t **out,
                                    size_t *out_len) {
@@ -957,20 +1007,61 @@ int raft_tracker_progress_snapshot(const raft_progress_tracker_t *tracker,
         return RAFT_ERR_OUT_OF_MEMORY;
     }
     for (i = 0; i < tracker->progress_len; ++i) {
+        tracker_progress_snapshot_copy(
+            &snapshots[i], &tracker->progress[i]);
+    }
+    *out = snapshots;
+    *out_len = tracker->progress_len;
+    return RAFT_OK;
+}
+
+void raft_tracker_status_progress_snapshot_free(
+    raft_status_progress_t *snapshots, size_t len) {
+    size_t i;
+
+    if (snapshots == NULL) {
+        return;
+    }
+    for (i = 0; i < len; ++i) {
+        free(snapshots[i].inflights.items);
+    }
+    free(snapshots);
+}
+
+int raft_tracker_status_progress_snapshot(
+    const raft_progress_tracker_t *tracker,
+    raft_status_progress_t **out,
+    size_t *out_len) {
+    raft_status_progress_t *snapshots;
+    size_t i;
+    int result;
+
+    if (tracker == NULL || out == NULL || out_len == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    *out = NULL;
+    *out_len = 0;
+    if (tracker->progress_len == 0) {
+        return RAFT_OK;
+    }
+    if (tracker->progress_len > SIZE_MAX / sizeof(*snapshots)) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    snapshots = calloc(tracker->progress_len, sizeof(*snapshots));
+    if (snapshots == NULL) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    for (i = 0; i < tracker->progress_len; ++i) {
         const raft_progress_internal_t *src = &tracker->progress[i];
-        raft_progress_snapshot_t *dst = &snapshots[i];
-        dst->id = src->id;
-        dst->type = src->is_learner
-                        ? RAFT_PROGRESS_LEARNER
-                        : RAFT_PROGRESS_PEER;
-        dst->progress.match_index = src->match_index;
-        dst->progress.next_index = src->next_index;
-        dst->progress.state = src->state;
-        dst->progress.pending_snapshot = src->pending_snapshot;
-        dst->progress.recent_active = src->recent_active;
-        dst->progress.message_flow_paused =
-            src->message_flow_paused;
-        dst->progress.is_learner = src->is_learner;
+        tracker_progress_snapshot_copy(
+            &snapshots[i].snapshot, src);
+        result = tracker_inflights_snapshot_copy(
+            &snapshots[i].inflights, &src->inflights);
+        if (result != RAFT_OK) {
+            raft_tracker_status_progress_snapshot_free(
+                snapshots, tracker->progress_len);
+            return result;
+        }
     }
     *out = snapshots;
     *out_len = tracker->progress_len;

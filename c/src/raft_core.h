@@ -89,6 +89,10 @@ bool raft_core_has_progress(const raft_t *raft, uint64_t id);
 int raft_core_progress_snapshot(const raft_t *raft,
                                 raft_progress_snapshot_t **out,
                                 size_t *out_len);
+int raft_core_status_progress_snapshot(
+    const raft_t *raft,
+    raft_status_progress_t **out,
+    size_t *out_len);
 int raft_core_conf_state_copy(const raft_t *raft, raft_conf_state_t *out);
 int raft_core_ready_messages_copy(const raft_t *raft,
                                   raft_message_vec_t *out);

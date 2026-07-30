@@ -665,7 +665,8 @@ void raft_status_free(raft_status_t *status) {
         return;
     }
     raft_conf_state_free(&status->conf_state);
-    raft_progress_snapshot_array_free(status->progress, status->progress_len);
+    raft_tracker_status_progress_snapshot_free(
+        status->progress, status->progress_len);
     memset(status, 0, sizeof(*status));
 }
 
@@ -1628,7 +1629,7 @@ int raft_raw_node_status(const raft_raw_node_t *raw_node,
         return result;
     }
     if (raw_node->raft.state == RAFT_STATE_LEADER) {
-        result = raft_core_progress_snapshot(
+        result = raft_core_status_progress_snapshot(
             &raw_node->raft,
             &status->progress,
             &status->progress_len);
