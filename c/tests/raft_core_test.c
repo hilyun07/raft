@@ -826,6 +826,74 @@ static void test_append_heartbeat_and_follower_proposal(void) {
     raft_raw_node_destroy(node);
 }
 
+static void test_heartbeat_commit_invariant(void) {
+    const uint64_t voters[] = {1, 2};
+    test_storage_t storage = {
+        .hard_state = {.term = 2, .commit = 1},
+        .voters = voters,
+        .voter_count = 2,
+        .last_index = 3,
+        .last_term = 2,
+    };
+    raft_config_t cfg = config(1);
+    raft_message_view_t heartbeat = {
+        .type = RAFT_MSG_HEARTBEAT,
+        .from = 2,
+        .to = 1,
+        .term = 2,
+        .context = {NULL, 0, true},
+    };
+    raft_raw_node_t *node;
+    raft_basic_status_t status;
+    raft_ready_t *ready = NULL;
+    uint64_t last_index;
+
+    cfg.applied = 1;
+
+    node = new_node_with_config(cfg, &storage);
+    heartbeat.commit = 1;
+    assert(raft_raw_node_step(node, &heartbeat) == RAFT_OK);
+    assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
+    assert(status.hard_state.commit == 1);
+    assert(node->raft.messages.len == 1);
+    assert(node->raft.messages.items[0].type ==
+           RAFT_MSG_HEARTBEAT_RESP);
+    raft_raw_node_destroy(node);
+
+    node = new_node_with_config(cfg, &storage);
+    heartbeat.commit = 2;
+    assert(raft_raw_node_step(node, &heartbeat) == RAFT_OK);
+    assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
+    assert(status.hard_state.commit == 2);
+    assert(node->raft.messages.len == 1);
+    raft_raw_node_destroy(node);
+
+    node = new_node_with_config(cfg, &storage);
+    heartbeat.commit = 3;
+    assert(raft_raw_node_step(node, &heartbeat) == RAFT_OK);
+    assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
+    assert(status.hard_state.commit == 3);
+    assert(node->raft.messages.len == 1);
+    raft_raw_node_destroy(node);
+
+    node = new_node_with_config(cfg, &storage);
+    heartbeat.commit = 4;
+    assert(raft_raw_node_step(node, &heartbeat) == RAFT_ERR_FATAL);
+    assert(raft_raw_node_error(node) == RAFT_ERR_FATAL);
+    assert(node->raft.log->committed == 1);
+    assert(raft_log_last_index(node->raft.log, &last_index) ==
+           RAFT_OK);
+    assert(last_index == 3);
+    assert(node->raft.messages.len == 0);
+    assert(raft_raw_node_has_ready(node));
+    assert(raft_raw_node_ready_without_accept(node, &ready) ==
+           RAFT_ERR_FATAL);
+    assert(ready == NULL);
+    assert(raft_raw_node_campaign(node) == RAFT_ERR_FATAL);
+    assert(node->raft.log->committed == 1);
+    raft_raw_node_destroy(node);
+}
+
 static void test_append_rejection_log_term_optimization(void) {
     const uint64_t voters[] = {1, 2};
     const struct {
@@ -1954,6 +2022,7 @@ int main(void) {
     test_candidate_vote_ownership();
     test_raft_progress_reset_semantics();
     test_append_heartbeat_and_follower_proposal();
+    test_heartbeat_commit_invariant();
     test_append_rejection_log_term_optimization();
     test_commit_only_ready_does_not_require_sync();
     test_election_replication_and_step_layering();

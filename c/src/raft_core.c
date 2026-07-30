@@ -1187,15 +1187,9 @@ static int core_handle_append(raft_t *raft,
 static int core_handle_heartbeat(raft_t *raft,
                                  const raft_message_view_t *message) {
     raft_message_t response;
-    uint64_t last_index;
     int result;
 
-    result = raft_log_last_index(raft->log, &last_index);
-    if (result != RAFT_OK) {
-        return result;
-    }
-    result = raft_log_commit_to(
-        raft->log, core_min_u64(message->commit, last_index));
+    result = raft_log_commit_to(raft->log, message->commit);
     if (result != RAFT_OK) {
         return result;
     }

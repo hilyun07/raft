@@ -669,6 +669,12 @@ int raft_confchange_restore(raft_progress_tracker_t *tracker,
          state->learners_next.len != 0)) {
         return RAFT_ERR_FATAL;
     }
+    for (i = 0; i < state->learners_next.len; ++i) {
+        if (raft_id_vec_contains(
+                &state->voters, state->learners_next.items[i])) {
+            return RAFT_ERR_FATAL;
+        }
+    }
     result = raft_tracker_init(&restored,
                                tracker->max_inflight_messages,
                                tracker->max_inflight_bytes);

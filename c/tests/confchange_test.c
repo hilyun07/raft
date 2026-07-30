@@ -39,6 +39,73 @@ static int apply_changes(raft_progress_tracker_t *tracker,
     return raft_confchange_apply(tracker, &change, 10);
 }
 
+static int restore_result(const raft_conf_state_t *state) {
+    raft_progress_tracker_t tracker;
+    int result;
+
+    assert(raft_tracker_init(&tracker, 8, 0) == RAFT_OK);
+    result = raft_confchange_restore(&tracker, state, 10);
+    if (result == RAFT_OK) {
+        assert(raft_confchange_check_invariants(&tracker) == RAFT_OK);
+    }
+    raft_tracker_free(&tracker);
+    return result;
+}
+
+static void test_restore_rejects_noncanonical_conf_states(void) {
+    uint64_t audit_voters[] = {1, 2, 3};
+    uint64_t audit_outgoing[] = {1, 2};
+    uint64_t audit_learners_next[] = {2};
+    raft_conf_state_t audit = {
+        .voters = {audit_voters, 3},
+        .voters_outgoing = {audit_outgoing, 2},
+        .learners_next = {audit_learners_next, 1},
+    };
+    uint64_t legal_voters[] = {1, 3};
+    raft_conf_state_t legal_demotion = {
+        .voters = {legal_voters, 2},
+        .voters_outgoing = {audit_outgoing, 2},
+        .learners_next = {audit_learners_next, 1},
+    };
+    uint64_t duplicate_voters[] = {1, 1};
+    raft_conf_state_t duplicate = {
+        .voters = {duplicate_voters, 2},
+    };
+    uint64_t overlap_voters[] = {1, 2};
+    uint64_t overlap_learners[] = {2};
+    raft_conf_state_t voter_learner_overlap = {
+        .voters = {overlap_voters, 2},
+        .learners = {overlap_learners, 1},
+    };
+    uint64_t unrelated_outgoing[] = {1};
+    raft_conf_state_t learner_next_without_outgoing_voter = {
+        .voters = {overlap_voters, 2},
+        .voters_outgoing = {unrelated_outgoing, 1},
+        .learners_next = {audit_learners_next, 1},
+    };
+    uint64_t example_voters[] = {1, 2, 3};
+    uint64_t example_outgoing[] = {1, 2, 4, 6};
+    uint64_t example_learners[] = {5};
+    uint64_t example_learners_next[] = {4};
+    raft_conf_state_t legal_joint = {
+        .voters = {example_voters, 3},
+        .voters_outgoing = {example_outgoing, 4},
+        .learners = {example_learners, 1},
+        .learners_next = {example_learners_next, 1},
+        .auto_leave = true,
+    };
+
+    // In etcd v3.7.0 restoration, the add-learner operation removes peer 2
+    // from incoming voters. The original state is therefore noncanonical.
+    assert(restore_result(&audit) == RAFT_ERR_FATAL);
+    assert(restore_result(&legal_demotion) == RAFT_OK);
+    assert(restore_result(&duplicate) == RAFT_ERR_FATAL);
+    assert(restore_result(&voter_learner_overlap) == RAFT_ERR_FATAL);
+    assert(restore_result(&learner_next_without_outgoing_voter) ==
+           RAFT_ERR_FATAL);
+    assert(restore_result(&legal_joint) == RAFT_OK);
+}
+
 static void test_simple_and_transactional_changes(void) {
     raft_progress_tracker_t tracker;
     raft_conf_change_single_t add_learner = {
@@ -266,6 +333,7 @@ static void test_protobuf_round_trip(void) {
 }
 
 int main(void) {
+    test_restore_rejects_noncanonical_conf_states();
     test_simple_and_transactional_changes();
     test_joint_demotion_preserves_progress();
     test_configuration_changes_preserve_vote_history();
