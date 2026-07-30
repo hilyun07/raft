@@ -31,6 +31,7 @@ typedef struct raft {
     raft_progress_tracker_t tracker;
 
     raft_message_vec_t messages;
+    raft_message_vec_t messages_after_append;
 
     uint32_t election_timeout;
     uint32_t heartbeat_timeout;
@@ -89,9 +90,12 @@ int raft_core_progress_snapshot(const raft_t *raft,
 int raft_core_conf_state_copy(const raft_t *raft, raft_conf_state_t *out);
 int raft_core_ready_messages_copy(const raft_t *raft,
                                   raft_message_vec_t *out);
+int raft_core_ready_messages_after_append_copy(
+    const raft_t *raft, raft_message_vec_t *out);
 int raft_core_ready_read_states_copy(const raft_t *raft,
                                      raft_read_state_vec_t *out);
 void raft_core_clear_messages(raft_t *raft);
+void raft_core_clear_messages_after_append(raft_t *raft);
 void raft_core_clear_read_states(raft_t *raft);
 void raft_core_reduce_uncommitted(raft_t *raft, uint64_t payload_size);
 

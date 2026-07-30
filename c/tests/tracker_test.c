@@ -118,8 +118,50 @@ static void test_progress_and_inflights(void) {
     raft_progress_free(&progress);
 }
 
+static void test_become_probe_resets_optimistic_state(void) {
+    raft_progress_internal_t progress;
+    raft_inflight_internal_t *buffer;
+    size_t capacity;
+
+    assert(raft_progress_init(&progress, 2, 5, true, 2, 100) == RAFT_OK);
+    progress.match_index = 4;
+    progress.recent_active = true;
+    raft_progress_become_replicate(&progress);
+    assert(raft_progress_sent_entries(&progress, 2, 40) == RAFT_OK);
+    assert(raft_progress_sent_entries(&progress, 1, 60) == RAFT_OK);
+    assert(progress.next_index == 8);
+    assert(progress.inflights.count == 2);
+    assert(progress.inflights.bytes == 100);
+    assert(progress.message_flow_paused);
+    progress.pending_snapshot = 9;
+    progress.sent_commit = 7;
+    buffer = progress.inflights.buffer;
+    capacity = progress.inflights.capacity;
+
+    raft_progress_become_probe(&progress);
+
+    assert(progress.state == RAFT_PROGRESS_STATE_PROBE);
+    assert(progress.match_index == 4);
+    assert(progress.next_index == 5);
+    assert(progress.sent_commit == 4);
+    assert(progress.pending_snapshot == 0);
+    assert(!progress.message_flow_paused);
+    assert(progress.inflights.start == 0);
+    assert(progress.inflights.count == 0);
+    assert(progress.inflights.bytes == 0);
+    assert(progress.inflights.buffer == buffer);
+    assert(progress.inflights.capacity == capacity);
+    assert(progress.inflights.size == 2);
+    assert(progress.inflights.max_bytes == 100);
+    assert(progress.recent_active);
+    assert(progress.is_learner);
+
+    raft_progress_free(&progress);
+}
+
 int main(void) {
     test_majority_and_joint_quorums();
     test_progress_and_inflights();
+    test_become_probe_resets_optimistic_state();
     return 0;
 }

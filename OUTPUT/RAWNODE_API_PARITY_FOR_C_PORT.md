@@ -49,18 +49,18 @@ consensus-dependent RawNode methods remain stubs.
 | `Propose([]byte)` | Yes, with borrowed `const raft_byte_view_t *` plus scalar cgo shim | Yes | Phase 6; limits completed in Phase 7 | A null descriptor is invalid, not nil. Preserve `is_nil` versus canonical present-empty; input retained beyond the call must be copied into owned `raft_bytes_t`. The Go binding must not allocate the descriptor in Go memory. Success means accepted for processing, not committed, and may still return proposal-dropped. |
 | `ProposeConfChange(ConfChangeI)` | Yes | Yes | Phase 7 | One temporary C ConfChangeV2 descriptor/change array and one RawNode call. Preserve legacy versus V2 encoding, joint transitions, opaque `is_nil` context, and proposal-time validation. |
 | `ApplyConfChange(ConfChangeI)` | Yes | Yes | Phase 7 | Same single-shot temporary C input rule; output ConfState is C-owned and batch-copied to Go. Preserve zero-NodeID cancellation and call only when applying a committed change. |
-| `Step(*Message)` | Yes, with `const raft_message_view_t *` | Yes | Phase 6, extended through Phases 7-11 | Go builds the complete temporary C descriptor graph, makes one call to public `raft_raw_node_step`, and frees it. That function performs public RawNode validation and delegates to `raft_raw_node_step_for_node`; never reverse this direction. Reject unexpected local messages and responses from unknown non-local peers. Retained input is recursively copied to owned `raft_message_t`. |
-| `Ready()` | Yes | Yes | Phase 6, completed in Phase 11 | Combined preview/accept operation. Must preserve previous-state comparisons, message draining, unstable acceptance, read-state draining, `MustSync`, and deferred completion steps. |
-| `readyWithoutAccept()` | Yes for the Go Node binding, public or private C ABI | Yes | Phase 6, completed in Phase 11 | Read-only preview. It must not consume work when the Node actor loses the Ready-channel select. |
-| `acceptReady(Ready)` | Yes for the Go Node binding, public or private C ABI | Yes | Phase 6, completed in Phase 11 | Acceptance occurs only after Ready delivery. It records prior states, drains output, accepts unstable work, and prepares advance responses. No intervening mutation is allowed after preview. |
-| `HasReady()` | Yes | Skeleton may return false only while backend is unusable | Phase 6, completed in Phase 11 | Must inspect every source of Ready work, including messages-after-append, read states, unstable snapshot/entries, and committed entries. |
-| `Advance(Ready)` | Yes: `raft_raw_node_advance(rn)` | Yes | Phase 6, completed in Phase 11 | C tracks accepted completion internally. Go makes one argument-free call and never reconstructs Ready. It must panic/fail if called in async mode. |
-| AsyncStorageWrites mode | Yes as config plus Ready behavior; an optional scalar getter can support Node caching | Config field may exist in skeleton | Phase 11 | `Advance` is forbidden; local append/apply targets are not network peers; same-target requests are reliable and ordered; append writes are durable before attached responses. |
+| `Step(*Message)` | Yes, with `const raft_message_view_t *` | Yes | Phase 6, extended through Phases 7-12 | Go builds the complete temporary C descriptor graph, makes one call to public `raft_raw_node_step`, and frees it. That function performs public RawNode validation and delegates to `raft_raw_node_step_for_node`; never reverse this direction. Reject unexpected local messages and responses from unknown non-local peers. Retained input is recursively copied to owned `raft_message_t`. |
+| `Ready()` | Yes | Yes | Phase 6, completed in Phase 12 | Combined preview/accept operation. Must preserve previous-state comparisons, message draining, unstable acceptance, read-state draining, `MustSync`, deferred completion steps, and async local work. |
+| `readyWithoutAccept()` | Yes for the Go Node binding, public or private C ABI | Yes | Phase 6, completed in Phase 12 | Read-only preview. It must not consume work when the Node actor loses the Ready-channel select; the cgo owner discards and replaces an unaccepted C preview when Node previews again. |
+| `acceptReady(Ready)` | Yes for the Go Node binding, public or private C ABI | Yes | Phase 6, completed in Phase 12 | Acceptance occurs only after Ready delivery. It records prior states, drains both message queues, accepts unstable/applying work, and prepares synchronous Advance responses or async pipelining. |
+| `HasReady()` | Yes | Skeleton may return false only while backend is unusable | Phase 6, completed in Phase 12 | Must inspect every source of Ready work, including messages-after-append, read states, unstable snapshot/entries, and mode-appropriate committed entries. |
+| `Advance(Ready)` | Yes: `raft_raw_node_advance(rn)` | Yes | Phase 6, completed in Phase 12 | C tracks accepted synchronous completion internally. Go makes one argument-free call and never reconstructs Ready. Go panics and native C returns invalid argument in async mode. |
+| AsyncStorageWrites mode | Yes as config plus Ready behavior; an optional scalar getter can support Node caching | Config field may exist in skeleton | Phase 12 | Implemented with ordered `MsgStorageAppend`/`MsgStorageApply`, nested responses, stable-only apply selection, response-driven completion, term/ABA protection, and no Advance. |
 | `ReadIndex([]byte)` | Yes, with borrowed `const raft_byte_view_t *` plus scalar cgo shim; returned context uses `raft_bytes_t` | Yes | Phase 9 | Request context is opaque and may be nil/empty, but its descriptor may not be null; preserve `is_nil`, copy before retention, and deep-copy returned context into Go. Request may be lost; returned read is usable only after applied index reaches `ReadState.Index`; lease mode requires CheckQuorum. |
 | `Status()` | Yes: `raft_raw_node_status` | Zero/follower stub acceptable | Phases 6 and 7 | Allocating full snapshot: BasicStatus plus cloned config; progress is populated only on leaders. Returned nested memory is C-owned until freed. |
 | `BasicStatus()` | Yes: `raft_raw_node_basic_status` | Yes | Phase 6 | Non-allocating snapshot of ID, HardState, SoftState, applied, and transferee. It must not allocate/return progress. Node uses it for proposal gating and logs. |
 | `WithProgress(visitor)` | Yes, as `raft_raw_node_progress_snapshot` | Yes | Phase 7 | Observational and not equivalent to `Status.Progress`: Go visits tracked peers/learners on every role, while full Status includes progress only for leaders. Return a C-owned snapshot array, never a live tracker pointer or C-to-Go callback. Do not expose inflight backing storage; emit only real IDs and identify peer versus learner. |
-| `ReportUnreachable(id)` | Yes | Yes | Phases 6-7 | ID is a real peer ID; core may no-op for an unknown member. It drives replicate-to-probe transitions. |
+| `ReportUnreachable(id)` | Yes | Yes | Phase 13 | ID is a real peer ID; unknown members and non-leaders are no-ops. A leader moves only `StateReplicate` progress to `StateProbe`, resetting optimistic Next, flow pause, pending snapshot, inflights, and sent-commit state through the existing tracker transition. |
 | `ReportSnapshot(id,status)` | Yes | Yes | Phase 8 | `SnapshotFinish` is normally a no-op; failure resumes probing. Every completed/failed `MsgSnap` transport must report. |
 | `TransferLeader(transferee)` | Yes: `raft_raw_node_transfer_leader(rn, transferee)` | Yes | Phase 10 | This is the canonical C RawNode API. Go RawNode accepts only the transferee. Unknown/zero transferees are core-compatible no-ops, while the strict C wrapper may reject reserved IDs. Transfer may require catch-up and times out. |
 | `ForgetLeader()` | Yes | Yes | Phase 10 | Follower clears only its known leader in the current term; leader is a no-op; lease-based read mode refuses/no-ops because forgetting would violate lease assumptions. |
@@ -187,7 +187,7 @@ Before Phase 3 is considered complete:
 - ownership and error mappings must follow
   `READY_OWNERSHIP_FOR_C_PORT.md` and `ERROR_MAPPING_FOR_C_PORT.md`.
 
-## Current implementation status through Phase 11
+## Current implementation status through Phase 13
 
 The opt-in C backend implements the synchronous RawNode core, tracker and
 joint membership changes, snapshot send/restore/report paths, ReadIndex,
@@ -197,6 +197,15 @@ including pre-candidate term rules, transfer catch-up and timeout,
 `MsgTimeoutNow`, the `CampaignTransfer` lease bypass, follower forwarding,
 proposal suppression, and transfer target status.
 
-ReportUnreachable and the async-storage protocol remain explicit
-`RAFT_ERR_NOT_IMPLEMENTED` operations. Randomized election timeout parity and
-TraceLogger integration also remain open.
+Phase 12 adds the `msgsAfterAppend` durability split, local
+`MsgStorageAppend`/`MsgStorageApply` work, ordered nested response delivery,
+async Ready pipelining, storage response handling, and the async Advance
+prohibition. It also moves synchronous self-vote and self-append accounting
+behind Advance, matching the original durability boundary.
+
+Phase 13 completes `ReportUnreachable` and `MsgUnreachable`, including direct
+RawNode and Node actor routing, the leader's replicate-to-probe transition,
+and heartbeat/append-response recovery.
+
+No genuine public RawNode operation remains explicitly unimplemented.
+Randomized election timeout parity and TraceLogger integration remain open.

@@ -180,6 +180,26 @@ static const raft_message_t *find_message(const raft_ready_t *ready,
     return NULL;
 }
 
+static raft_progress_t progress_for(raft_raw_node_t *node, uint64_t id) {
+    raft_progress_snapshot_t *rows = NULL;
+    size_t len = 0;
+    size_t i;
+    raft_progress_t progress;
+
+    memset(&progress, 0, sizeof(progress));
+    assert(raft_raw_node_progress_snapshot(node, &rows, &len) == RAFT_OK);
+    for (i = 0; i < len; ++i) {
+        if (rows[i].id == id) {
+            progress = rows[i].progress;
+            raft_progress_snapshot_array_free(rows, len);
+            return progress;
+        }
+    }
+    raft_progress_snapshot_array_free(rows, len);
+    assert(0 && "progress not found");
+    return progress;
+}
+
 static int step_owned(raft_raw_node_t *node,
                       const raft_message_t *message,
                       bool public_step) {
@@ -225,7 +245,32 @@ static int step_owned(raft_raw_node_t *node,
     return result;
 }
 
+static void persist_ready(test_storage_t *storage,
+                          const raft_ready_t *ready) {
+    if (ready->has_hard_state) {
+        storage->hard_state = ready->hard_state;
+    }
+    if (ready->entries.len != 0) {
+        const raft_entry_t *last =
+            &ready->entries.items[ready->entries.len - 1];
+        storage->last_index = last->index;
+        storage->last_term = last->term;
+    }
+}
+
+static void accept_and_advance(raft_raw_node_t *node,
+                               test_storage_t *storage) {
+    raft_ready_t *ready = NULL;
+
+    assert(raft_raw_node_ready(node, &ready) == RAFT_OK);
+    assert(ready != NULL);
+    persist_ready(storage, ready);
+    raft_ready_destroy(ready);
+    assert(raft_raw_node_advance(node) == RAFT_OK);
+}
+
 static void elect_three_node_leader(raft_raw_node_t *node,
+                                    test_storage_t *storage,
                                     uint64_t term) {
     const raft_message_view_t vote_response = {
         .type = RAFT_MSG_VOTE_RESP,
@@ -235,10 +280,12 @@ static void elect_three_node_leader(raft_raw_node_t *node,
         .context = {NULL, 0, true},
     };
     assert(raft_raw_node_campaign(node) == RAFT_OK);
+    accept_and_advance(node, storage);
     assert(raft_raw_node_step(node, &vote_response) == RAFT_OK);
 }
 
 static void commit_leader_noop(raft_raw_node_t *node,
+                               test_storage_t *storage,
                                uint64_t term,
                                uint64_t index) {
     const raft_message_view_t append_response = {
@@ -249,6 +296,7 @@ static void commit_leader_noop(raft_raw_node_t *node,
         .index = index,
         .context = {NULL, 0, true},
     };
+    accept_and_advance(node, storage);
     assert(raft_raw_node_step(node, &append_response) == RAFT_OK);
 }
 
@@ -302,6 +350,7 @@ static void test_tick_starts_single_node_election(void) {
     assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
     assert(status.soft_state.raft_state == RAFT_STATE_FOLLOWER);
     raft_raw_node_tick(node);
+    accept_and_advance(node, &storage);
     assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
     assert(status.soft_state.raft_state == RAFT_STATE_LEADER);
     assert(status.hard_state.term == 1);
@@ -557,9 +606,15 @@ static void test_election_replication_and_step_layering(void) {
 
     message = find_message(ready1, RAFT_MSG_VOTE, 2);
     assert(step_owned(nodes[1], message, true) == RAFT_OK);
+    persist_ready(&storage[0], ready1);
+    assert(raft_raw_node_accept_ready(nodes[0], ready1) == RAFT_OK);
+    assert(raft_raw_node_advance(nodes[0]) == RAFT_OK);
     assert(raft_raw_node_ready_without_accept(nodes[1], &ready2) ==
            RAFT_OK);
     message = find_message(ready2, RAFT_MSG_VOTE_RESP, 1);
+    persist_ready(&storage[1], ready2);
+    assert(raft_raw_node_accept_ready(nodes[1], ready2) == RAFT_OK);
+    assert(raft_raw_node_advance(nodes[1]) == RAFT_OK);
     assert(step_owned(nodes[0], message, true) == RAFT_OK);
     raft_ready_destroy(ready2);
     ready2 = NULL;
@@ -570,10 +625,16 @@ static void test_election_replication_and_step_layering(void) {
            RAFT_OK);
     assert(ready1->soft_state.raft_state == RAFT_STATE_LEADER);
     message = find_message(ready1, RAFT_MSG_APP, 2);
+    persist_ready(&storage[0], ready1);
+    assert(raft_raw_node_accept_ready(nodes[0], ready1) == RAFT_OK);
+    assert(raft_raw_node_advance(nodes[0]) == RAFT_OK);
     assert(step_owned(nodes[1], message, true) == RAFT_OK);
     assert(raft_raw_node_ready_without_accept(nodes[1], &ready2) ==
            RAFT_OK);
     message = find_message(ready2, RAFT_MSG_APP_RESP, 1);
+    persist_ready(&storage[1], ready2);
+    assert(raft_raw_node_accept_ready(nodes[1], ready2) == RAFT_OK);
+    assert(raft_raw_node_advance(nodes[1]) == RAFT_OK);
     assert(step_owned(nodes[0], message, true) == RAFT_OK);
     raft_ready_destroy(ready2);
     ready2 = NULL;
@@ -621,8 +682,8 @@ static void test_unsupported_configuration_is_explicit(void) {
     node = NULL;
     cfg = config(1);
     cfg.async_storage_writes = true;
-    assert(raft_raw_node_new(&cfg, &ops, &node) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_new(&cfg, &ops, &node) == RAFT_OK);
+    raft_raw_node_destroy(node);
 }
 
 static void test_pre_vote_election_and_stale_log(void) {
@@ -684,8 +745,11 @@ static void test_pre_vote_election_and_stale_log(void) {
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
     message = find_message(ready, RAFT_MSG_PRE_VOTE, 2);
     assert(message != NULL && message->term == 2);
+    persist_ready(&storage, ready);
+    assert(raft_raw_node_accept_ready(node, ready) == RAFT_OK);
     raft_ready_destroy(ready);
     ready = NULL;
+    assert(raft_raw_node_advance(node) == RAFT_OK);
 
     assert(raft_raw_node_step(node, &pre_vote_response) == RAFT_OK);
     assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
@@ -695,8 +759,11 @@ static void test_pre_vote_election_and_stale_log(void) {
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
     message = find_message(ready, RAFT_MSG_VOTE, 2);
     assert(message != NULL && message->term == 2);
+    persist_ready(&storage, ready);
+    assert(raft_raw_node_accept_ready(node, ready) == RAFT_OK);
     raft_ready_destroy(ready);
     ready = NULL;
+    assert(raft_raw_node_advance(node) == RAFT_OK);
 
     assert(raft_raw_node_step(node, &vote_response) == RAFT_OK);
     assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
@@ -810,8 +877,8 @@ static void test_leadership_transfer_paths(void) {
 
     cfg.applied = 1;
     node = new_node_with_config(cfg, &storage);
-    elect_three_node_leader(node, 2);
-    commit_leader_noop(node, 2, 2);
+    elect_three_node_leader(node, &storage, 2);
+    commit_leader_noop(node, &storage, 2, 2);
 
     assert(raft_raw_node_transfer_leader(node, 2) == RAFT_OK);
     assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
@@ -831,8 +898,12 @@ static void test_leadership_transfer_paths(void) {
     assert(status.lead_transferee == RAFT_NONE);
     raft_raw_node_destroy(node);
 
+    storage.hard_state =
+        (raft_hard_state_t){.term = 1, .commit = 1};
+    storage.last_index = 1;
+    storage.last_term = 1;
     node = new_node_with_config(cfg, &storage);
-    elect_three_node_leader(node, 2);
+    elect_three_node_leader(node, &storage, 2);
     assert(raft_raw_node_transfer_leader(node, 3) == RAFT_OK);
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
     assert(find_message(ready, RAFT_MSG_APP, 3) != NULL);
@@ -929,7 +1000,7 @@ static void test_safe_read_index_and_stepdown(void) {
     };
     raft_message_view_t heartbeat_response;
 
-    elect_three_node_leader(node, 2);
+    elect_three_node_leader(node, &storage, 2);
     assert(raft_raw_node_read_index(node, &request) == RAFT_OK);
     request_context[0] = 'X';
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
@@ -938,7 +1009,7 @@ static void test_safe_read_index_and_stepdown(void) {
     raft_ready_destroy(ready);
     ready = NULL;
 
-    commit_leader_noop(node, 2, 2);
+    commit_leader_noop(node, &storage, 2, 2);
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
     heartbeat = find_message(ready, RAFT_MSG_HEARTBEAT, 2);
     assert(heartbeat != NULL);
@@ -966,9 +1037,11 @@ static void test_safe_read_index_and_stepdown(void) {
 
     storage.hard_state.term = 1;
     storage.hard_state.commit = 1;
+    storage.last_index = 1;
+    storage.last_term = 1;
     node = new_node(1, &storage);
-    elect_three_node_leader(node, 2);
-    commit_leader_noop(node, 2, 2);
+    elect_three_node_leader(node, &storage, 2);
+    commit_leader_noop(node, &storage, 2, 2);
     request_context[0] = 'z';
     assert(raft_raw_node_read_index(node, &request) == RAFT_OK);
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
@@ -1026,8 +1099,8 @@ static void test_lease_read_and_check_quorum(void) {
     cfg.check_quorum = true;
     cfg.read_only_option = RAFT_READ_ONLY_LEASE_BASED;
     node = new_node_with_config(cfg, &storage);
-    elect_three_node_leader(node, 2);
-    commit_leader_noop(node, 2, 2);
+    elect_three_node_leader(node, &storage, 2);
+    commit_leader_noop(node, &storage, 2, 2);
     assert(raft_raw_node_read_index(node, &context) == RAFT_OK);
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
     assert(ready->read_states.len == 1);
@@ -1070,6 +1143,215 @@ static void test_uncommitted_proposal_limit(void) {
     raft_raw_node_destroy(node);
 }
 
+static void test_report_unreachable_paths(void) {
+    const uint64_t voters[] = {1, 2, 3};
+    const uint8_t byte = 1;
+    const raft_byte_view_t proposal = {&byte, 1, false};
+    test_storage_t storage = {
+        .hard_state = {.term = 1, .commit = 1},
+        .voters = voters,
+        .voter_count = 3,
+        .last_index = 1,
+        .last_term = 1,
+    };
+    raft_config_t cfg = config(1);
+    raft_raw_node_t *node;
+    raft_progress_t before;
+    raft_progress_t after;
+    raft_basic_status_t status;
+    const raft_message_view_t append_response_2 = {
+        .type = RAFT_MSG_APP_RESP,
+        .to = 1,
+        .from = 2,
+        .term = 2,
+        .index = 2,
+        .context = {NULL, 0, true},
+    };
+    const raft_message_view_t append_response_3 = {
+        .type = RAFT_MSG_APP_RESP,
+        .to = 1,
+        .from = 2,
+        .term = 2,
+        .index = 3,
+        .context = {NULL, 0, true},
+    };
+    const raft_message_view_t unreachable = {
+        .type = RAFT_MSG_UNREACHABLE,
+        .from = 2,
+        .context = {NULL, 0, true},
+    };
+    const raft_message_view_t storage_append_work = {
+        .type = RAFT_MSG_STORAGE_APPEND,
+        .from = 1,
+        .to = RAFT_LOCAL_APPEND_THREAD,
+        .context = {NULL, 0, true},
+    };
+    const raft_message_view_t storage_apply_work = {
+        .type = RAFT_MSG_STORAGE_APPLY,
+        .from = 1,
+        .to = RAFT_LOCAL_APPLY_THREAD,
+        .context = {NULL, 0, true},
+    };
+
+    cfg.applied = 1;
+    node = new_node_with_config(cfg, &storage);
+
+    before = progress_for(node, 2);
+    assert(before.state == RAFT_PROGRESS_STATE_PROBE);
+    assert(raft_raw_node_report_unreachable(node, 2) == RAFT_OK);
+    after = progress_for(node, 2);
+    assert(after.state == before.state);
+    assert(after.match_index == before.match_index);
+    assert(after.next_index == before.next_index);
+    assert(!raft_raw_node_has_ready(node));
+
+    assert(raft_raw_node_report_unreachable(node, 99) == RAFT_OK);
+    assert(!raft_raw_node_has_ready(node));
+    assert(raft_raw_node_step_for_node(
+               node, &storage_append_work) == RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_step_for_node(
+               node, &storage_apply_work) == RAFT_ERR_NOT_IMPLEMENTED);
+
+    elect_three_node_leader(node, &storage, 2);
+    accept_and_advance(node, &storage);
+    assert(raft_raw_node_step(node, &append_response_2) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
+    assert(status.soft_state.raft_state == RAFT_STATE_LEADER);
+
+    assert(raft_raw_node_propose(node, &proposal) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    assert(!raft_raw_node_has_ready(node));
+    before = progress_for(node, 2);
+    assert(before.state == RAFT_PROGRESS_STATE_REPLICATE);
+    assert(before.match_index == 2);
+    assert(before.next_index == 4);
+
+    assert(raft_raw_node_report_unreachable(node, 2) == RAFT_OK);
+    after = progress_for(node, 2);
+    assert(after.state == RAFT_PROGRESS_STATE_PROBE);
+    assert(after.match_index == before.match_index);
+    assert(after.next_index == after.match_index + 1);
+    assert(after.pending_snapshot == 0);
+    assert(!after.message_flow_paused);
+    assert(after.recent_active == before.recent_active);
+    assert(after.is_learner == before.is_learner);
+    assert(!raft_raw_node_has_ready(node));
+
+    before = after;
+    assert(raft_raw_node_report_unreachable(node, 2) == RAFT_OK);
+    after = progress_for(node, 2);
+    assert(after.state == before.state);
+    assert(after.match_index == before.match_index);
+    assert(after.next_index == before.next_index);
+    assert(!raft_raw_node_has_ready(node));
+
+    assert(raft_raw_node_step(node, &append_response_3) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    assert(progress_for(node, 2).state ==
+           RAFT_PROGRESS_STATE_REPLICATE);
+
+    assert(raft_raw_node_propose(node, &proposal) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    before = progress_for(node, 2);
+    assert(before.state == RAFT_PROGRESS_STATE_REPLICATE);
+    assert(raft_raw_node_step_for_node(node, &unreachable) == RAFT_OK);
+    after = progress_for(node, 2);
+    assert(after.state == RAFT_PROGRESS_STATE_PROBE);
+    assert(after.match_index == before.match_index);
+    assert(after.next_index == after.match_index + 1);
+    assert(!raft_raw_node_has_ready(node));
+
+    raft_raw_node_destroy(node);
+}
+
+static void test_async_storage_write_protocol(void) {
+    const uint64_t voters[] = {1};
+    test_storage_t storage = {
+        .hard_state = {.term = 1, .commit = 1},
+        .voters = voters,
+        .voter_count = 1,
+        .last_index = 1,
+        .last_term = 1,
+    };
+    raft_config_t cfg = config(1);
+    raft_raw_node_t *node;
+    raft_ready_t *ready = NULL;
+    const raft_message_t *append;
+    const raft_message_t *apply;
+    raft_basic_status_t status;
+    size_t i;
+
+    cfg.applied = 1;
+    cfg.async_storage_writes = true;
+    node = new_node_with_config(cfg, &storage);
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    assert(raft_raw_node_ready(node, &ready) == RAFT_OK);
+    assert(ready != NULL);
+    assert(ready->has_hard_state);
+    append = find_message(
+        ready, RAFT_MSG_STORAGE_APPEND, RAFT_LOCAL_APPEND_THREAD);
+    assert(append != NULL);
+    assert(append->entries.len == 0);
+    assert(append->responses.len == 1);
+    assert(append->responses.items[0].type == RAFT_MSG_VOTE_RESP);
+    persist_ready(&storage, ready);
+    for (i = 0; i < append->responses.len; ++i) {
+        assert(step_owned(node, &append->responses.items[i], true) ==
+               RAFT_OK);
+    }
+    raft_ready_destroy(ready);
+    ready = NULL;
+    assert(raft_raw_node_advance(node) == RAFT_ERR_INVALID_ARGUMENT);
+    assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
+    assert(status.soft_state.raft_state == RAFT_STATE_LEADER);
+
+    assert(raft_raw_node_ready(node, &ready) == RAFT_OK);
+    assert(ready->entries.len == 1);
+    assert(ready->committed_entries.len == 0);
+    append = find_message(
+        ready, RAFT_MSG_STORAGE_APPEND, RAFT_LOCAL_APPEND_THREAD);
+    assert(append != NULL);
+    assert(append->entries.len == 1);
+    assert(append->responses.len == 2);
+    assert(append->responses.items[0].type == RAFT_MSG_APP_RESP);
+    assert(append->responses.items[1].type ==
+           RAFT_MSG_STORAGE_APPEND_RESP);
+    assert(append->responses.items[1].from ==
+           RAFT_LOCAL_APPEND_THREAD);
+    assert(append->responses.items[1].index ==
+           append->entries.items[0].index);
+    persist_ready(&storage, ready);
+    for (i = 0; i < append->responses.len; ++i) {
+        assert(step_owned(node, &append->responses.items[i], true) ==
+               RAFT_OK);
+    }
+    raft_ready_destroy(ready);
+    ready = NULL;
+
+    assert(raft_raw_node_ready(node, &ready) == RAFT_OK);
+    assert(ready->entries.len == 0);
+    assert(ready->committed_entries.len == 1);
+    append = find_message(
+        ready, RAFT_MSG_STORAGE_APPEND, RAFT_LOCAL_APPEND_THREAD);
+    apply = find_message(
+        ready, RAFT_MSG_STORAGE_APPLY, RAFT_LOCAL_APPLY_THREAD);
+    assert(append != NULL);
+    assert(apply != NULL);
+    assert(apply->entries.len == 1);
+    assert(apply->responses.len == 1);
+    assert(apply->responses.items[0].type ==
+           RAFT_MSG_STORAGE_APPLY_RESP);
+    persist_ready(&storage, ready);
+    assert(step_owned(node, &apply->responses.items[0], true) ==
+           RAFT_OK);
+    raft_ready_destroy(ready);
+    ready = NULL;
+    assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
+    assert(status.applied == 2);
+    raft_raw_node_destroy(node);
+}
+
 int main(void) {
     test_initial_state_and_configuration();
     test_tick_starts_single_node_election();
@@ -1085,5 +1367,7 @@ int main(void) {
     test_safe_read_index_and_stepdown();
     test_lease_read_and_check_quorum();
     test_uncommitted_proposal_limit();
+    test_report_unreachable_paths();
+    test_async_storage_write_protocol();
     return 0;
 }

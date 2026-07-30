@@ -85,6 +85,16 @@ func TestCGoRawNodeMinimalCoreLifecycleAndBoundary(t *testing.T) {
 	if err := rn.Campaign(); err != nil {
 		t.Fatalf("Campaign: %v", err)
 	}
+	campaignReady := rn.Ready()
+	if campaignReady.SoftState == nil ||
+		campaignReady.SoftState.RaftState != StateCandidate {
+		t.Fatalf("campaign Ready SoftState = %+v, want candidate", campaignReady.SoftState)
+	}
+	if campaignReady.HardState.GetTerm() != 2 ||
+		campaignReady.HardState.GetVote() != 1 {
+		t.Fatalf("campaign Ready HardState = %+v, want term=2 vote=1", campaignReady.HardState)
+	}
+	cgoPersistAndAdvance(t, rn, storage, campaignReady)
 	if err := rn.Propose([]byte("value")); err != nil {
 		t.Fatalf("Propose: %v", err)
 	}
@@ -102,10 +112,7 @@ func TestCGoRawNodeMinimalCoreLifecycleAndBoundary(t *testing.T) {
 	if rd.SoftState == nil || rd.SoftState.RaftState != StateLeader {
 		t.Fatalf("Ready SoftState = %+v, want leader", rd.SoftState)
 	}
-	if rd.HardState.GetTerm() != 2 || rd.HardState.GetVote() != 1 {
-		t.Fatalf("Ready HardState = %+v, want term=2 vote=1", rd.HardState)
-	}
-	if len(rd.Entries) != 2 || len(rd.CommittedEntries) != 2 {
+	if len(rd.Entries) != 2 || len(rd.CommittedEntries) != 0 {
 		t.Fatalf("Ready entries=%d committed=%d, want no-op/proposal", len(rd.Entries), len(rd.CommittedEntries))
 	}
 	if err := storage.Append(rd.Entries); err != nil {
@@ -117,6 +124,12 @@ func TestCGoRawNodeMinimalCoreLifecycleAndBoundary(t *testing.T) {
 		}
 	}
 	rn.Advance(rd)
+	applyReady := rn.Ready()
+	if len(applyReady.Entries) != 0 || len(applyReady.CommittedEntries) != 2 {
+		t.Fatalf("apply Ready entries=%d committed=%d, want committed no-op/proposal",
+			len(applyReady.Entries), len(applyReady.CommittedEntries))
+	}
+	cgoPersistAndAdvance(t, rn, storage, applyReady)
 
 	visited := 0
 	rn.WithProgress(func(id uint64, typ ProgressType, pr tracker.Progress) {
@@ -222,7 +235,9 @@ func cgoSingleLeader(t *testing.T) (*RawNode, *MemoryStorage) {
 	if err := rn.Campaign(); err != nil {
 		t.Fatal(err)
 	}
-	cgoPersistAndAdvance(t, rn, storage, rn.Ready())
+	for rn.HasReady() {
+		cgoPersistAndAdvance(t, rn, storage, rn.Ready())
+	}
 	return rn, storage
 }
 
@@ -256,7 +271,7 @@ func cgoCompactedSnapshotStorage(t *testing.T) *cgoSnapshotStorage {
 	return storage
 }
 
-func cgoElectSnapshotLeader(t *testing.T, storage Storage) *RawNode {
+func cgoElectSnapshotLeader(t *testing.T, storage *cgoSnapshotStorage) *RawNode {
 	t.Helper()
 	cfg := cgoSkeletonConfig()
 	cfg.Storage = storage
@@ -268,6 +283,7 @@ func cgoElectSnapshotLeader(t *testing.T, storage Storage) *RawNode {
 		rn.destroy()
 		t.Fatal(err)
 	}
+	cgoPersistAndAdvance(t, rn, storage.MemoryStorage, rn.Ready())
 	if err := rn.Step(&pb.Message{
 		Type: pb.MsgVoteResp.Enum(),
 		To:   new(uint64(1)),
@@ -610,16 +626,23 @@ func TestCGoRawNodeJointAutoLeaveProposal(t *testing.T) {
 		t.Fatal(err)
 	}
 	rd := rn.Ready()
-	if len(rd.CommittedEntries) != 1 ||
-		rd.CommittedEntries[0].GetType() != pb.EntryConfChangeV2 {
-		t.Fatalf("joint committed entries = %+v", rd.CommittedEntries)
+	if len(rd.Entries) != 1 ||
+		rd.Entries[0].GetType() != pb.EntryConfChangeV2 ||
+		len(rd.CommittedEntries) != 0 {
+		t.Fatalf("joint proposal Ready = %+v", rd)
 	}
 	wantData, err := proto.Marshal(joint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(rd.CommittedEntries[0].Data, wantData) {
-		t.Fatalf("joint entry data = %x, want %x", rd.CommittedEntries[0].Data, wantData)
+	if !bytes.Equal(rd.Entries[0].Data, wantData) {
+		t.Fatalf("joint entry data = %x, want %x", rd.Entries[0].Data, wantData)
+	}
+	cgoPersistAndAdvance(t, rn, storage, rd)
+	rd = rn.Ready()
+	if len(rd.CommittedEntries) != 1 ||
+		rd.CommittedEntries[0].GetType() != pb.EntryConfChangeV2 {
+		t.Fatalf("joint committed entries = %+v", rd.CommittedEntries)
 	}
 	state := rn.ApplyConfChange(joint)
 	if !state.GetAutoLeave() ||

@@ -30,7 +30,7 @@ The recommended ownership split is:
 | `Storage Storage` | separate `raft_storage_ops_t` constructor argument | Required and non-nil. Every required callback must be present. | Skeleton checks table shape in Phase 2; Phase 4 implements `cgo.Handle`, callbacks, panic firewall, and error mapping; Phases 5-8 consume it. |
 | `Applied uint64` | `applied` | Default zero. Current `Config.validate` does not range-check it, but restart initialization must reject/panic on an applied index inconsistent with the recovered log/commit state. | Prevents already-applied entries from being re-emitted after restart. Used in Phase 5/6 and tested in Phase 12. |
 | `MaxSizePerMsg uint64` | `max_size_per_message` | No normalization: `math.MaxUint64` means unlimited; zero means at most one entry per append message. | Replication batching in Phase 6. Do not reinterpret zero as unlimited. |
-| `MaxCommittedSizePerReady uint64` | `max_committed_size_per_ready` | If zero, default to normalized `MaxSizePerMsg`. | Limits committed-entry payload across Ready; in async mode the quota spans outstanding, unacknowledged apply messages. Phases 6 and 11. |
+| `MaxCommittedSizePerReady uint64` | `max_committed_size_per_ready` | If zero, default to normalized `MaxSizePerMsg`. | Limits committed-entry payload across Ready; in async mode the quota spans outstanding, unacknowledged apply messages. Phases 6 and 12. |
 | `MaxUncommittedEntriesSize uint64` | `max_uncommitted_entries_size` | If zero, normalize to `math.MaxUint64` (`noLimit`). | Bounds aggregate uncommitted proposal payload. Exceeding it causes `ErrProposalDropped`; leader bookkeeping/reset belongs to Phase 6 and multinode tests to Phase 7. |
 | `MaxInflightMsgs int` | `max_inflight_messages size_t` | Must be greater than zero; no default. Reject negative or unrepresentable values. | Caps optimistic append messages per follower. Required when progress/inflights are ported in Phase 7. |
 | `MaxInflightBytes uint64` | `max_inflight_bytes` | Zero normalizes to `math.MaxUint64`; otherwise must be at least `MaxSizePerMsg`. | Byte complement to message-count flow control. Phase 7. |
@@ -38,7 +38,7 @@ The recommended ownership split is:
 | `PreVote bool` | `pre_vote` | Default false. | Prevents disruptive term increments by partitioned nodes. Phase 10. |
 | `ReadOnlyOption` | `read_only_option uint32_t` | Numeric mapping must be `ReadOnlySafe=0`, `ReadOnlyLeaseBased=1`; reject unknown values. Lease-based requires CheckQuorum. | Safe mode confirms through quorum; lease mode relies on bounded clock behavior. Phase 9, with CheckQuorum integration in Phase 10. |
 | `DisableProposalForwarding bool` | `disable_proposal_forwarding` | Default false. | Followers drop instead of forward proposals. Phase 6. |
-| `AsyncStorageWrites bool` | `async_storage_writes` | Default false. | Changes the entire Ready contract: local storage messages replace direct fields/Advance. Field exists in Phase 2, real behavior belongs to Phase 11. |
+| `AsyncStorageWrites bool` | `async_storage_writes` | Default false. | Changes the Ready processing contract: fields remain observable, while ordered local storage messages replace their processing and response messages replace Advance. Field exists in Phase 2; real behavior completed in Phase 12. |
 | `Logger Logger` | no current C config field | Go nil defaults to package logger. | Keep Go-side for Node/binding logs initially. A C logger callback is optional; if added, use a handle, panic firewall, and no reentrancy. Skeleton consensus must not require it. |
 | `DisableConfChangeValidation bool` | `disable_conf_change_validation` | Default false. | Disables best-effort propose-time checks only; apply-time configuration invariants remain mandatory. Phase 7. |
 | `StepDownOnRemoval bool` | `step_down_on_removal` | Default false in current Go behavior. | Controls whether a removed/demoted leader immediately becomes follower. Phase 7, with leadership behavior verified in Phase 10. |
@@ -128,8 +128,8 @@ accounting, tick behavior, proposal forwarding, and Ready pagination.
 
 Phase 7 activates inflight flow control and config-change flags. Phase 10
 activates read-only and CheckQuorum. Phase 11 activates PreVote and its
-leadership-transfer/CheckQuorum interactions. The alternate async storage
-protocol remains pending.
+leadership-transfer/CheckQuorum interactions. Phase 12 activates the
+alternate async storage protocol.
 
 ### Required tests
 
@@ -148,5 +148,6 @@ uses election/heartbeat ticks, `MaxSizePerMsg`,
 `MaxInflightMsgs` and `MaxInflightBytes` now drive the Phase 8 tracker and
 flow-control implementation. Phase 10 activates CheckQuorum and both read-only
 modes; lease reads still require CheckQuorum during validation. Phase 11
-activates `PreVote`. `AsyncStorageWrites` remains rejected with
-`RAFT_ERR_NOT_IMPLEMENTED`.
+activates `PreVote`. Phase 12 accepts `AsyncStorageWrites` and uses
+mode-specific Ready generation, applying limits, and response-driven
+completion.

@@ -298,6 +298,7 @@ static int core_read_state_vec_push(raft_read_state_vec_t *states,
 }
 
 static int core_send(raft_t *raft, raft_message_t *message) {
+    bool after_append;
     bool vote_message;
 
     if (raft == NULL || message == NULL || !raft_message_valid(message)) {
@@ -323,10 +324,17 @@ static int core_send(raft_t *raft, raft_message_t *message) {
             message->term = raft->term;
         }
     }
-    if (message->to == RAFT_NONE || message->to == raft->id) {
+    after_append = message->type == RAFT_MSG_APP_RESP ||
+                   message->type == RAFT_MSG_VOTE_RESP ||
+                   message->type == RAFT_MSG_PRE_VOTE_RESP;
+    if (message->to == RAFT_NONE ||
+        (message->to == raft->id && !after_append)) {
         return RAFT_ERR_FATAL;
     }
-    return core_message_vec_push(&raft->messages, message);
+    return core_message_vec_push(
+        after_append ? &raft->messages_after_append
+                     : &raft->messages,
+        message);
 }
 
 static raft_progress_internal_t *core_find_progress(
@@ -424,7 +432,6 @@ static int core_become_candidate(raft_t *raft) {
     if (self == NULL || self->is_learner) {
         return RAFT_ERR_FATAL;
     }
-    raft_tracker_record_vote(&raft->tracker, raft->id, true);
     return RAFT_OK;
 }
 
@@ -441,7 +448,6 @@ static int core_become_pre_candidate(raft_t *raft) {
     if (self == NULL || self->is_learner) {
         return RAFT_ERR_FATAL;
     }
-    raft_tracker_record_vote(&raft->tracker, raft->id, true);
     return RAFT_OK;
 }
 
@@ -475,12 +481,11 @@ static int core_append_entries(raft_t *raft,
                                const raft_entry_view_t *entries,
                                size_t entry_count) {
     raft_entry_t *owned;
-    raft_progress_internal_t *self;
+    raft_message_t response;
     uint64_t last_index;
     uint64_t payload_size;
     size_t i;
     int result;
-    bool committed;
 
     if (entry_count == 0 || entries == NULL) {
         return RAFT_ERR_FATAL;
@@ -521,14 +526,11 @@ static int core_append_entries(raft_t *raft,
         return result;
     }
     raft->uncommitted_size += payload_size;
-    self = core_find_progress(raft, raft->id);
-    if (self == NULL) {
-        return RAFT_ERR_PROPOSAL_DROPPED;
-    }
-    self->match_index = last_index;
-    self->next_index =
-        last_index == UINT64_MAX ? UINT64_MAX : last_index + 1;
-    result = core_maybe_commit(raft, &committed);
+    core_message_init(&response, RAFT_MSG_APP_RESP);
+    response.to = raft->id;
+    response.index = last_index;
+    result = core_send(raft, &response);
+    raft_message_free(&response);
     return result;
 }
 
@@ -867,6 +869,11 @@ static int core_has_unapplied_conf_changes(
 }
 
 static int core_campaign(raft_t *raft, core_campaign_type_t campaign_type);
+static int core_send_vote_response(raft_t *raft,
+                                   uint64_t to,
+                                   uint64_t term,
+                                   raft_message_type_t type,
+                                   bool reject);
 
 static int core_campaign(raft_t *raft, core_campaign_type_t campaign_type) {
     raft_message_type_t vote_type;
@@ -892,29 +899,30 @@ static int core_campaign(raft_t *raft, core_campaign_type_t campaign_type) {
     if (result != RAFT_OK) {
         return result;
     }
-    if (raft_tracker_vote_result(&raft->tracker) ==
-        RAFT_VOTE_WON) {
-        if (campaign_type == CORE_CAMPAIGN_PRE_ELECTION) {
-            return core_campaign(raft, CORE_CAMPAIGN_ELECTION);
-        }
-        result = core_become_leader(raft);
-        return result == RAFT_OK ? core_broadcast_append(raft)
-                                 : result;
-    }
     for (i = 0; i < raft->tracker.progress_len; ++i) {
         raft_progress_internal_t *progress =
             &raft->tracker.progress[i];
         if (!raft_tracker_is_voter(
-                &raft->tracker, progress->id) ||
-            progress->id == raft->id) {
+                &raft->tracker, progress->id)) {
             continue;
         }
-        result = core_send_vote_request(
-            raft,
-            progress->id,
-            vote_type,
-            term,
-            campaign_type);
+        if (progress->id == raft->id) {
+            result = core_send_vote_response(
+                raft,
+                raft->id,
+                term,
+                vote_type == RAFT_MSG_PRE_VOTE
+                    ? RAFT_MSG_PRE_VOTE_RESP
+                    : RAFT_MSG_VOTE_RESP,
+                false);
+        } else {
+            result = core_send_vote_request(
+                raft,
+                progress->id,
+                vote_type,
+                term,
+                campaign_type);
+        }
         if (result != RAFT_OK) {
             return result;
         }
@@ -1795,16 +1803,19 @@ static int core_handle_append_response(
             return result;
         }
         result = core_broadcast_append(raft);
-    } else if (raft_progress_can_bump_commit(
+    } else if (message->from != raft->id &&
+               raft_progress_can_bump_commit(
                    progress, raft->log->committed)) {
         result = core_send_append(raft, progress);
     }
     if (result != RAFT_OK) {
         return result;
     }
-    result = core_send_pending_entries(raft, progress);
-    if (result != RAFT_OK) {
-        return result;
+    if (message->from != raft->id) {
+        result = core_send_pending_entries(raft, progress);
+        if (result != RAFT_OK) {
+            return result;
+        }
     }
     if (updated && message->from == raft->lead_transferee) {
         uint64_t last_index;
@@ -1976,6 +1987,16 @@ static int core_step_leader(raft_t *raft,
             progress->message_flow_paused = true;
             return RAFT_OK;
         }
+        case RAFT_MSG_UNREACHABLE: {
+            raft_progress_internal_t *progress =
+                core_find_progress(raft, message->from);
+            if (progress != NULL &&
+                progress->state ==
+                    RAFT_PROGRESS_STATE_REPLICATE) {
+                raft_progress_become_probe(progress);
+            }
+            return RAFT_OK;
+        }
         case RAFT_MSG_TRANSFER_LEADER:
             return core_handle_transfer_leader(raft, message);
         case RAFT_MSG_FORGET_LEADER:
@@ -2089,6 +2110,7 @@ void raft_core_free(raft_t *raft) {
     raft_message_vec_free(&raft->pending_read_index_messages);
     raft_read_state_vec_free(&raft->read_states);
     raft_tracker_free(&raft->tracker);
+    raft_message_vec_free(&raft->messages_after_append);
     raft_message_vec_free(&raft->messages);
     memset(raft, 0, sizeof(*raft));
 }
@@ -2475,6 +2497,67 @@ int raft_core_maybe_auto_leave(raft_t *raft, uint64_t applied) {
     return result == RAFT_ERR_PROPOSAL_DROPPED ? RAFT_OK : result;
 }
 
+static int core_apply_storage_snapshot(
+    raft_t *raft, const raft_snapshot_view_t *snapshot) {
+    uint64_t index;
+    int result;
+
+    if (raft == NULL || snapshot == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    index = snapshot->metadata.index;
+    raft_log_stable_snap_to(raft->log, index);
+    result = raft_log_applied_to(raft->log, index, 0);
+    return result == RAFT_OK
+               ? raft_core_maybe_auto_leave(raft, index)
+               : result;
+}
+
+static int core_handle_storage_apply_response(
+    raft_t *raft, const raft_entry_view_vec_t *entries) {
+    uint64_t applying_size = 0;
+    uint64_t payload_size = 0;
+    size_t i;
+    int result;
+
+    if (raft == NULL || entries == NULL ||
+        !core_array_valid(entries->items, entries->len)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    if (entries->len == 0) {
+        return RAFT_OK;
+    }
+    for (i = 0; i < entries->len; ++i) {
+        const raft_entry_view_t *entry = &entries->items[i];
+        raft_entry_t sizing_entry;
+        uint64_t entry_size;
+        uint64_t entry_payload = (uint64_t)entry->data.len;
+
+        memset(&sizing_entry, 0, sizeof(sizing_entry));
+        sizing_entry.type = entry->type;
+        sizing_entry.term = entry->term;
+        sizing_entry.index = entry->index;
+        sizing_entry.data.len = entry->data.len;
+        entry_size = raft_log_entry_encoding_size(&sizing_entry);
+        if (UINT64_MAX - applying_size < entry_size ||
+            UINT64_MAX - payload_size < entry_payload) {
+            return RAFT_ERR_FATAL;
+        }
+        applying_size += entry_size;
+        payload_size += entry_payload;
+    }
+    result = raft_log_applied_to(
+        raft->log,
+        entries->items[entries->len - 1].index,
+        applying_size);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    raft_core_reduce_uncommitted(raft, payload_size);
+    return raft_core_maybe_auto_leave(
+        raft, entries->items[entries->len - 1].index);
+}
+
 int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
     int result;
 
@@ -2484,11 +2567,8 @@ int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
     if (raft->error != RAFT_OK) {
         return raft->error;
     }
-    if (message->type == RAFT_MSG_UNREACHABLE ||
-        message->type == RAFT_MSG_STORAGE_APPEND ||
-        message->type == RAFT_MSG_STORAGE_APPEND_RESP ||
-        message->type == RAFT_MSG_STORAGE_APPLY ||
-        message->type == RAFT_MSG_STORAGE_APPLY_RESP) {
+    if (message->type == RAFT_MSG_STORAGE_APPEND ||
+        message->type == RAFT_MSG_STORAGE_APPLY) {
         return RAFT_ERR_NOT_IMPLEMENTED;
     }
     if (message->term != 0 && message->term > raft->term) {
@@ -2539,7 +2619,27 @@ int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
                 RAFT_MSG_PRE_VOTE_RESP,
                 true);
         }
+        if (message->type == RAFT_MSG_STORAGE_APPEND_RESP &&
+            message->has_snapshot) {
+            return core_apply_storage_snapshot(
+                raft, &message->snapshot);
+        }
         return RAFT_OK;
+    }
+    if (message->type == RAFT_MSG_STORAGE_APPEND_RESP) {
+        if (message->index != 0) {
+            raft_log_stable_to(
+                raft->log, message->index, message->log_term);
+        }
+        if (message->has_snapshot) {
+            return core_apply_storage_snapshot(
+                raft, &message->snapshot);
+        }
+        return RAFT_OK;
+    }
+    if (message->type == RAFT_MSG_STORAGE_APPLY_RESP) {
+        return core_handle_storage_apply_response(
+            raft, &message->entries);
     }
     if (message->type == RAFT_MSG_HUP) {
         return core_hup(
@@ -2634,6 +2734,39 @@ int raft_core_ready_messages_copy(const raft_t *raft,
     return RAFT_OK;
 }
 
+int raft_core_ready_messages_after_append_copy(
+    const raft_t *raft, raft_message_vec_t *out) {
+    size_t i;
+
+    if (raft == NULL || out == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    memset(out, 0, sizeof(*out));
+    if (raft->messages_after_append.len == 0) {
+        return RAFT_OK;
+    }
+    if (raft->messages_after_append.len >
+        SIZE_MAX / sizeof(*out->items)) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    out->items = calloc(
+        raft->messages_after_append.len, sizeof(*out->items));
+    if (out->items == NULL) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    out->len = raft->messages_after_append.len;
+    for (i = 0; i < raft->messages_after_append.len; ++i) {
+        int result = core_message_copy(
+            &out->items[i],
+            &raft->messages_after_append.items[i]);
+        if (result != RAFT_OK) {
+            raft_message_vec_free(out);
+            return result;
+        }
+    }
+    return RAFT_OK;
+}
+
 int raft_core_ready_read_states_copy(const raft_t *raft,
                                      raft_read_state_vec_t *out) {
     size_t i;
@@ -2672,6 +2805,12 @@ int raft_core_ready_read_states_copy(const raft_t *raft,
 void raft_core_clear_messages(raft_t *raft) {
     if (raft != NULL) {
         raft_message_vec_free(&raft->messages);
+    }
+}
+
+void raft_core_clear_messages_after_append(raft_t *raft) {
+    if (raft != NULL) {
+        raft_message_vec_free(&raft->messages_after_append);
     }
 }
 

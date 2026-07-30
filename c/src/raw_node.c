@@ -711,17 +711,308 @@ static uint64_t entry_vec_encoding_size(const raft_entry_vec_t *entries) {
     return size;
 }
 
-static uint64_t entry_vec_payload_size(const raft_entry_vec_t *entries) {
-    uint64_t size = 0;
-    size_t i;
-    for (i = 0; i < entries->len; ++i) {
-        uint64_t entry_size = (uint64_t)entries->items[i].data.len;
-        if (UINT64_MAX - size < entry_size) {
-            return UINT64_MAX;
-        }
-        size += entry_size;
+static void raw_message_init(raft_message_t *message,
+                             raft_message_type_t type) {
+    memset(message, 0, sizeof(*message));
+    message->type = type;
+    message->context.is_nil = true;
+    message->snapshot.data.is_nil = true;
+}
+
+static int raw_message_vec_push(raft_message_vec_t *messages,
+                                raft_message_t *message) {
+    raft_message_t *items;
+
+    if (messages == NULL || message == NULL ||
+        !raft_message_valid(message)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
     }
-    return size;
+    if (messages->len == SIZE_MAX ||
+        messages->len + 1 > SIZE_MAX / sizeof(*items)) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    items = realloc(messages->items,
+                    (messages->len + 1) * sizeof(*items));
+    if (items == NULL) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    messages->items = items;
+    messages->items[messages->len] = *message;
+    ++messages->len;
+    memset(message, 0, sizeof(*message));
+    return RAFT_OK;
+}
+
+static int raw_entry_vec_copy(raft_entry_vec_t *dst,
+                              const raft_entry_vec_t *src) {
+    size_t i;
+
+    if (dst == NULL || src == NULL ||
+        (src->len != 0 && src->items == NULL)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    memset(dst, 0, sizeof(*dst));
+    if (src->len == 0) {
+        return RAFT_OK;
+    }
+    if (src->len > SIZE_MAX / sizeof(*dst->items)) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    dst->items = calloc(src->len, sizeof(*dst->items));
+    if (dst->items == NULL) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    dst->len = src->len;
+    for (i = 0; i < src->len; ++i) {
+        raft_entry_view_t view = {
+            .type = src->items[i].type,
+            .term = src->items[i].term,
+            .index = src->items[i].index,
+            .data = {
+                .data = src->items[i].data.data,
+                .len = src->items[i].data.len,
+                .is_nil = src->items[i].data.is_nil,
+            },
+        };
+        int result =
+            raft_entry_copy_from_view(&dst->items[i], &view);
+        if (result != RAFT_OK) {
+            raft_entry_vec_free(dst);
+            return result;
+        }
+    }
+    return RAFT_OK;
+}
+
+static int raw_snapshot_copy(raft_snapshot_t *dst,
+                             const raft_snapshot_t *src) {
+    raft_snapshot_view_t view;
+
+    if (dst == NULL || src == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    memset(&view, 0, sizeof(view));
+    view.data.data = src->data.data;
+    view.data.len = src->data.len;
+    view.data.is_nil = src->data.is_nil;
+    view.metadata.index = src->metadata.index;
+    view.metadata.term = src->metadata.term;
+    view.metadata.conf_state.voters.items =
+        src->metadata.conf_state.voters.items;
+    view.metadata.conf_state.voters.len =
+        src->metadata.conf_state.voters.len;
+    view.metadata.conf_state.voters_outgoing.items =
+        src->metadata.conf_state.voters_outgoing.items;
+    view.metadata.conf_state.voters_outgoing.len =
+        src->metadata.conf_state.voters_outgoing.len;
+    view.metadata.conf_state.learners.items =
+        src->metadata.conf_state.learners.items;
+    view.metadata.conf_state.learners.len =
+        src->metadata.conf_state.learners.len;
+    view.metadata.conf_state.learners_next.items =
+        src->metadata.conf_state.learners_next.items;
+    view.metadata.conf_state.learners_next.len =
+        src->metadata.conf_state.learners_next.len;
+    view.metadata.conf_state.auto_leave =
+        src->metadata.conf_state.auto_leave;
+    return raft_snapshot_copy_from_view(dst, &view);
+}
+
+static int raw_new_storage_append_response(
+    raft_raw_node_t *raw_node,
+    const raft_ready_t *ready,
+    raft_message_t *response) {
+    int result;
+
+    raw_message_init(response, RAFT_MSG_STORAGE_APPEND_RESP);
+    response->to = raw_node->raft.id;
+    response->from = RAFT_LOCAL_APPEND_THREAD;
+    response->term = raw_node->raft.term;
+    if (raft_log_has_next_or_in_progress_unstable_entries(
+            &raw_node->log)) {
+        result = raft_log_last_index(
+            &raw_node->log, &response->index);
+        if (result == RAFT_OK) {
+            result = raft_log_last_term(
+                &raw_node->log, &response->log_term);
+        }
+        if (result != RAFT_OK) {
+            raft_message_free(response);
+            return result;
+        }
+    }
+    if (ready->has_snapshot) {
+        response->has_snapshot = true;
+        result = raw_snapshot_copy(
+            &response->snapshot, &ready->snapshot);
+        if (result != RAFT_OK) {
+            raft_message_free(response);
+            return result;
+        }
+    }
+    return RAFT_OK;
+}
+
+static bool raw_need_storage_append_response(
+    const raft_raw_node_t *raw_node,
+    const raft_ready_t *ready) {
+    return raft_log_has_next_or_in_progress_unstable_entries(
+               &raw_node->log) ||
+           ready->has_snapshot;
+}
+
+static int raw_new_storage_append(
+    raft_raw_node_t *raw_node,
+    const raft_ready_t *ready,
+    raft_message_t *message) {
+    raft_message_t response;
+    int result;
+
+    raw_message_init(message, RAFT_MSG_STORAGE_APPEND);
+    message->to = RAFT_LOCAL_APPEND_THREAD;
+    message->from = raw_node->raft.id;
+    result = raw_entry_vec_copy(
+        &message->entries, &ready->entries);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
+    if (ready->has_hard_state) {
+        message->term = ready->hard_state.term;
+        message->vote = ready->hard_state.vote;
+        message->commit = ready->hard_state.commit;
+    }
+    if (ready->has_snapshot) {
+        message->has_snapshot = true;
+        result = raw_snapshot_copy(
+            &message->snapshot, &ready->snapshot);
+        if (result != RAFT_OK) {
+            goto fail;
+        }
+    }
+    result = raft_core_ready_messages_after_append_copy(
+        &raw_node->raft, &message->responses);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
+    if (raw_need_storage_append_response(raw_node, ready)) {
+        result = raw_new_storage_append_response(
+            raw_node, ready, &response);
+        if (result != RAFT_OK) {
+            goto fail;
+        }
+        result = raw_message_vec_push(
+            &message->responses, &response);
+        raft_message_free(&response);
+        if (result != RAFT_OK) {
+            goto fail;
+        }
+    }
+    return RAFT_OK;
+
+fail:
+    raft_message_free(message);
+    return result;
+}
+
+static int raw_new_storage_apply(
+    raft_raw_node_t *raw_node,
+    const raft_ready_t *ready,
+    raft_message_t *message) {
+    raft_message_t response;
+    int result;
+
+    raw_message_init(message, RAFT_MSG_STORAGE_APPLY);
+    message->to = RAFT_LOCAL_APPLY_THREAD;
+    message->from = raw_node->raft.id;
+    result = raw_entry_vec_copy(
+        &message->entries, &ready->committed_entries);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
+    raw_message_init(&response, RAFT_MSG_STORAGE_APPLY_RESP);
+    response.to = raw_node->raft.id;
+    response.from = RAFT_LOCAL_APPLY_THREAD;
+    result = raw_entry_vec_copy(
+        &response.entries, &ready->committed_entries);
+    if (result != RAFT_OK) {
+        raft_message_free(&response);
+        goto fail;
+    }
+    result = raw_message_vec_push(
+        &message->responses, &response);
+    raft_message_free(&response);
+    if (result != RAFT_OK) {
+        goto fail;
+    }
+    return RAFT_OK;
+
+fail:
+    raft_message_free(message);
+    return result;
+}
+
+static int raw_append_synchronous_after_append_messages(
+    raft_raw_node_t *raw_node, raft_ready_t *ready) {
+    raft_message_vec_t delayed = {0};
+    size_t i;
+    int result;
+
+    result = raft_core_ready_messages_after_append_copy(
+        &raw_node->raft, &delayed);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    for (i = 0; i < delayed.len; ++i) {
+        if (delayed.items[i].to == raw_node->raft.id) {
+            continue;
+        }
+        result = raw_message_vec_push(
+            &ready->messages, &delayed.items[i]);
+        if (result != RAFT_OK) {
+            raft_message_vec_free(&delayed);
+            return result;
+        }
+    }
+    raft_message_vec_free(&delayed);
+    return RAFT_OK;
+}
+
+static int raw_append_async_storage_messages(
+    raft_raw_node_t *raw_node, raft_ready_t *ready) {
+    raft_message_t message;
+    bool need_append =
+        ready->entries.len != 0 || ready->has_hard_state ||
+        ready->has_snapshot ||
+        raw_node->raft.messages_after_append.len != 0;
+    int result;
+
+    if (need_append) {
+        result = raw_new_storage_append(
+            raw_node, ready, &message);
+        if (result != RAFT_OK) {
+            return result;
+        }
+        result = raw_message_vec_push(
+            &ready->messages, &message);
+        raft_message_free(&message);
+        if (result != RAFT_OK) {
+            return result;
+        }
+    }
+    if (ready->committed_entries.len != 0) {
+        result = raw_new_storage_apply(
+            raw_node, ready, &message);
+        if (result != RAFT_OK) {
+            return result;
+        }
+        result = raw_message_vec_push(
+            &ready->messages, &message);
+        raft_message_free(&message);
+        if (result != RAFT_OK) {
+            return result;
+        }
+    }
+    return RAFT_OK;
 }
 
 static bool raft_must_sync(const raft_hard_state_t *state,
@@ -768,7 +1059,9 @@ static int raw_node_build_ready(raft_raw_node_t *raw_node,
     }
     if (result == RAFT_OK) {
         result = raft_log_next_committed_entries(
-            &raw_node->log, true, &ready->committed_entries);
+            &raw_node->log,
+            !raw_node->config.async_storage_writes,
+            &ready->committed_entries);
     }
     if (result == RAFT_OK) {
         result = raft_core_ready_read_states_copy(
@@ -777,6 +1070,13 @@ static int raw_node_build_ready(raft_raw_node_t *raw_node,
     if (result == RAFT_OK) {
         result = raft_core_ready_messages_copy(
             &raw_node->raft, &ready->messages);
+    }
+    if (result == RAFT_OK) {
+        result = raw_node->config.async_storage_writes
+                     ? raw_append_async_storage_messages(
+                           raw_node, ready)
+                     : raw_append_synchronous_after_append_messages(
+                           raw_node, ready);
     }
     if (result != RAFT_OK) {
         raft_ready_destroy(ready);
@@ -795,6 +1095,7 @@ void raft_raw_node_destroy(raft_raw_node_t *raw_node) {
     if (raw_node == NULL) {
         return;
     }
+    raft_message_vec_free(&raw_node->steps_on_advance);
     raft_core_free(&raw_node->raft);
     raft_log_free(&raw_node->log);
     memset(raw_node, 0, sizeof(*raw_node));
@@ -834,12 +1135,6 @@ int raft_raw_node_new(const raft_config_t *config,
     if (!config_valid(config) || !storage_ops_valid(storage)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    // Subsystems not ported yet remain explicit rather than silently running
-    // with incomplete semantics.
-    if (config->async_storage_writes) {
-        return RAFT_ERR_NOT_IMPLEMENTED;
-    }
-
     raw_node = calloc(1, sizeof(*raw_node));
     if (raw_node == NULL) {
         return RAFT_ERR_OUT_OF_MEMORY;
@@ -1030,18 +1325,85 @@ static bool raft_must_sync(const raft_hard_state_t *st,
            st->vote != prev->vote;
 }
 
+static int raw_capture_steps_on_advance(
+    raft_raw_node_t *raw_node, const raft_ready_t *ready) {
+    raft_message_vec_t delayed = {0};
+    raft_message_t response;
+    size_t i;
+    int result;
+
+    if (raw_node->steps_on_advance.len != 0 || ready == NULL) {
+        return RAFT_ERR_FATAL;
+    }
+    result = raft_core_ready_messages_after_append_copy(
+        &raw_node->raft, &delayed);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    for (i = 0; i < delayed.len; ++i) {
+        if (delayed.items[i].to != raw_node->raft.id) {
+            continue;
+        }
+        result = raw_message_vec_push(
+            &raw_node->steps_on_advance, &delayed.items[i]);
+        if (result != RAFT_OK) {
+            raft_message_vec_free(&delayed);
+            raft_message_vec_free(
+                &raw_node->steps_on_advance);
+            return result;
+        }
+    }
+    raft_message_vec_free(&delayed);
+    if (raw_need_storage_append_response(raw_node, ready)) {
+        result = raw_new_storage_append_response(
+            raw_node, ready, &response);
+        if (result != RAFT_OK) {
+            goto fail;
+        }
+        result = raw_message_vec_push(
+            &raw_node->steps_on_advance, &response);
+        raft_message_free(&response);
+        if (result != RAFT_OK) {
+            goto fail;
+        }
+    }
+    if (ready->committed_entries.len != 0) {
+        raw_message_init(
+            &response, RAFT_MSG_STORAGE_APPLY_RESP);
+        response.to = raw_node->raft.id;
+        response.from = RAFT_LOCAL_APPLY_THREAD;
+        result = raw_entry_vec_copy(
+            &response.entries, &ready->committed_entries);
+        if (result != RAFT_OK) {
+            raft_message_free(&response);
+            goto fail;
+        }
+        result = raw_message_vec_push(
+            &raw_node->steps_on_advance, &response);
+        raft_message_free(&response);
+        if (result != RAFT_OK) {
+            goto fail;
+        }
+    }
+    return RAFT_OK;
+
+fail:
+    raft_message_vec_free(&raw_node->steps_on_advance);
+    return result;
+}
+
 // helper function
 int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
                                const raft_ready_t *ready) {
     const raft_entry_t *last;
     uint64_t applying_size;
-    uint64_t payload_size;
     int result;
 
     if (raw_node == NULL || ready == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    if (raw_node->ready_accepted ||
+    if ((!raw_node->config.async_storage_writes &&
+         raw_node->ready_accepted) ||
         ready->opaque_token != raw_node->ready_generation) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
@@ -1054,39 +1416,25 @@ int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
         return RAFT_ERR_INVALID_ARGUMENT;
     }
 
-    memset(&raw_node->completion, 0, sizeof(raw_node->completion));
-    if (ready->entries.len != 0) {
-        last = &ready->entries.items[ready->entries.len - 1];
-        raw_node->completion.has_stable_entry = true;
-        raw_node->completion.stable_index = last->index;
-        raw_node->completion.stable_term = last->term;
-    }
-    if (ready->has_snapshot) {
-        raw_node->completion.has_stable_snapshot = true;
-        raw_node->completion.stable_snapshot_index =
-            ready->snapshot.metadata.index;
-        raw_node->completion.has_applied = true;
-        raw_node->completion.applied_index =
-            ready->snapshot.metadata.index;
+    if (!raw_node->config.async_storage_writes) {
+        result = raw_capture_steps_on_advance(raw_node, ready);
+        if (result != RAFT_OK) {
+            return result;
+        }
     }
     applying_size = entry_vec_encoding_size(&ready->committed_entries);
-    payload_size = entry_vec_payload_size(&ready->committed_entries);
     if (ready->committed_entries.len != 0) {
         last =
             &ready->committed_entries.items[
                 ready->committed_entries.len - 1];
         result = raft_log_accept_applying(
-            &raw_node->log, last->index, applying_size, true);
+            &raw_node->log,
+            last->index,
+            applying_size,
+            !raw_node->config.async_storage_writes);
         if (result != RAFT_OK) {
-            memset(&raw_node->completion,
-                   0,
-                   sizeof(raw_node->completion));
-            return result;
+            goto fail;
         }
-        raw_node->completion.has_applied = true;
-        raw_node->completion.applied_index = last->index;
-        raw_node->completion.applied_size = applying_size;
-        raw_node->completion.applied_payload_size = payload_size;
     }
 
     if (ready->has_soft_state) {
@@ -1099,13 +1447,19 @@ int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
         raft_core_clear_read_states(&raw_node->raft);
     }
     raft_core_clear_messages(&raw_node->raft);
+    raft_core_clear_messages_after_append(&raw_node->raft);
     raft_log_accept_unstable(&raw_node->log);
-    raw_node->ready_accepted = true;
+    raw_node->ready_accepted =
+        !raw_node->config.async_storage_writes;
     ++raw_node->ready_generation;
     if (raw_node->ready_generation == 0) {
         raw_node->ready_generation = 1;
     }
     return RAFT_OK;
+
+fail:
+    raft_message_vec_free(&raw_node->steps_on_advance);
+    return result;
 }
 
 bool raft_raw_node_has_ready(const raft_raw_node_t *raw_node) {
@@ -1126,46 +1480,131 @@ bool raft_raw_node_has_ready(const raft_raw_node_t *raw_node) {
                              &raw_node->previous_hard_state) ||
            raft_log_has_next_unstable_entries(&raw_node->log) ||
            raft_log_has_next_unstable_snapshot(&raw_node->log) ||
-           raft_log_has_next_committed_entries(&raw_node->log, true) ||
+           raft_log_has_next_committed_entries(
+               &raw_node->log,
+               !raw_node->config.async_storage_writes) ||
            raw_node->raft.read_states.len != 0 ||
-           raw_node->raft.messages.len != 0;
+           raw_node->raft.messages.len != 0 ||
+           raw_node->raft.messages_after_append.len != 0;
+}
+
+static int raw_step_after_append_message(
+    raft_raw_node_t *raw_node,
+    const raft_message_t *message) {
+    raft_message_view_t view;
+    raft_entry_view_t *entries = NULL;
+    size_t i;
+    int result;
+
+    if (raw_node == NULL || message == NULL ||
+        message->responses.len != 0) {
+        return RAFT_ERR_FATAL;
+    }
+    if (message->entries.len != 0) {
+        if (message->entries.len >
+            SIZE_MAX / sizeof(*entries)) {
+            return RAFT_ERR_OUT_OF_MEMORY;
+        }
+        entries = calloc(
+            message->entries.len, sizeof(*entries));
+        if (entries == NULL) {
+            return RAFT_ERR_OUT_OF_MEMORY;
+        }
+        for (i = 0; i < message->entries.len; ++i) {
+            entries[i].type = message->entries.items[i].type;
+            entries[i].term = message->entries.items[i].term;
+            entries[i].index = message->entries.items[i].index;
+            entries[i].data.data =
+                message->entries.items[i].data.data;
+            entries[i].data.len =
+                message->entries.items[i].data.len;
+            entries[i].data.is_nil =
+                message->entries.items[i].data.is_nil;
+        }
+    }
+    memset(&view, 0, sizeof(view));
+    view.type = message->type;
+    view.to = message->to;
+    view.from = message->from;
+    view.term = message->term;
+    view.log_term = message->log_term;
+    view.index = message->index;
+    view.commit = message->commit;
+    view.vote = message->vote;
+    view.reject = message->reject;
+    view.reject_hint = message->reject_hint;
+    view.entries.items = entries;
+    view.entries.len = message->entries.len;
+    view.has_snapshot = message->has_snapshot;
+    if (message->has_snapshot) {
+        view.snapshot.data.data = message->snapshot.data.data;
+        view.snapshot.data.len = message->snapshot.data.len;
+        view.snapshot.data.is_nil =
+            message->snapshot.data.is_nil;
+        view.snapshot.metadata.index =
+            message->snapshot.metadata.index;
+        view.snapshot.metadata.term =
+            message->snapshot.metadata.term;
+        view.snapshot.metadata.conf_state.voters.items =
+            message->snapshot.metadata.conf_state.voters.items;
+        view.snapshot.metadata.conf_state.voters.len =
+            message->snapshot.metadata.conf_state.voters.len;
+        view.snapshot.metadata.conf_state.voters_outgoing.items =
+            message->snapshot.metadata.conf_state
+                .voters_outgoing.items;
+        view.snapshot.metadata.conf_state.voters_outgoing.len =
+            message->snapshot.metadata.conf_state
+                .voters_outgoing.len;
+        view.snapshot.metadata.conf_state.learners.items =
+            message->snapshot.metadata.conf_state.learners.items;
+        view.snapshot.metadata.conf_state.learners.len =
+            message->snapshot.metadata.conf_state.learners.len;
+        view.snapshot.metadata.conf_state.learners_next.items =
+            message->snapshot.metadata.conf_state
+                .learners_next.items;
+        view.snapshot.metadata.conf_state.learners_next.len =
+            message->snapshot.metadata.conf_state
+                .learners_next.len;
+        view.snapshot.metadata.conf_state.auto_leave =
+            message->snapshot.metadata.conf_state.auto_leave;
+    } else {
+        view.snapshot.data.is_nil = true;
+    }
+    view.context.data = message->context.data;
+    view.context.len = message->context.len;
+    view.context.is_nil = message->context.is_nil;
+    result = raft_core_step(&raw_node->raft, &view);
+    free(entries);
+    return result;
 }
 
 int raft_raw_node_advance(raft_raw_node_t *raw_node) {
     int result = RAFT_OK;
+    size_t i;
+
     if (raw_node == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    if (raw_node->config.async_storage_writes) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     if (!raw_node->ready_accepted) {
         return RAFT_OK;
     }
-    if (raw_node->completion.has_stable_entry) {
-        raft_log_stable_to(&raw_node->log,
-                           raw_node->completion.stable_index,
-                           raw_node->completion.stable_term);
-    }
-    if (raw_node->completion.has_stable_snapshot) {
-        raft_log_stable_snap_to(
-            &raw_node->log,
-            raw_node->completion.stable_snapshot_index);
-    }
-    if (raw_node->completion.has_applied) {
-        result = raft_log_applied_to(
-            &raw_node->log,
-            raw_node->completion.applied_index,
-            raw_node->completion.applied_size);
-        if (result == RAFT_OK) {
-            raft_core_reduce_uncommitted(
-                &raw_node->raft,
-                raw_node->completion.applied_payload_size);
-            result = raft_core_maybe_auto_leave(
-                &raw_node->raft,
-                raw_node->completion.applied_index);
+    for (i = 0; i < raw_node->steps_on_advance.len; ++i) {
+        result = raw_step_after_append_message(
+            raw_node, &raw_node->steps_on_advance.items[i]);
+        if (result != RAFT_OK) {
+            raw_node->raft.error = result;
+            break;
         }
+    }
+    raft_message_vec_free(&raw_node->steps_on_advance);
+    if (result != RAFT_OK) {
+        return result;
     }
     if (result == RAFT_OK) {
         raw_node->ready_accepted = false;
-        memset(&raw_node->completion, 0, sizeof(raw_node->completion));
     }
     return result;
 }
@@ -1245,10 +1684,16 @@ void raft_progress_snapshot_array_free(raft_progress_snapshot_t *snapshots,
 
 
 int raft_raw_node_report_unreachable(raft_raw_node_t *raw_node, uint64_t id) {
+    raft_message_view_t message;
+
     if (raw_node == NULL || !raft_is_valid_node_id(id)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    return RAFT_ERR_NOT_IMPLEMENTED;
+    memset(&message, 0, sizeof(message));
+    message.type = RAFT_MSG_UNREACHABLE;
+    message.from = id;
+    message.context.is_nil = true;
+    return raft_core_step(&raw_node->raft, &message);
 }
 
 int raft_raw_node_report_snapshot(raft_raw_node_t *raw_node,

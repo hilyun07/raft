@@ -607,7 +607,9 @@ int raft_raw_node_ready_without_accept(raft_raw_node_t *raw_node,
 int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
                                const raft_ready_t *ready);
 // Advances the internally accepted Ready. The Go binding does not reconstruct
-// or pass a pointer-bearing raft_ready_t back into C.
+// or pass a pointer-bearing raft_ready_t back into C. This returns
+// RAFT_ERR_INVALID_ARGUMENT when async_storage_writes is enabled; ordered
+// MsgStorageAppendResp and MsgStorageApplyResp messages replace Advance.
 int raft_raw_node_advance(raft_raw_node_t *raw_node);
 
 // Enqueues the same local MsgReadIndex request as Go RawNode.ReadIndex.

@@ -374,15 +374,21 @@ func cMessage(src *C.raft_message_t) *pb.Message {
 		Type:       &typ,
 		To:         &to,
 		From:       &from,
-		Term:       &term,
 		LogTerm:    &logTerm,
 		Index:      &index,
 		Entries:    cEntryVec(src.entries),
-		Commit:     &commit,
-		Vote:       &vote,
 		Reject:     &reject,
 		RejectHint: &rejectHint,
 		Context:    cOwnedBytes(src.context),
+	}
+	// MsgStorageAppend uses the three fields as an optional HardState tuple.
+	// A valid changed HardState cannot transition back to all zero values, so
+	// the all-zero tuple produced by C unambiguously means that no update was
+	// attached. Preserve Go's required all-present/all-absent shape here.
+	if typ != pb.MsgStorageAppend || term != 0 || vote != 0 || commit != 0 {
+		out.Term = &term
+		out.Vote = &vote
+		out.Commit = &commit
 	}
 	if bool(src.has_snapshot) {
 		out.Snapshot = cSnapshot(&src.snapshot)

@@ -58,9 +58,9 @@ const (
 )
 
 // NewRawNode instantiates the opt-in C-backed RawNode. The C core implements
-// election, replication, progress tracking, quorum calculation, and
-// membership changes; remaining advanced features stay explicit unsupported
-// operations.
+// election, replication, progress tracking, quorum calculation, membership
+// changes, and asynchronous storage writes. Remaining unsupported features
+// stay explicit errors.
 func NewRawNode(config *Config) (*RawNode, error) {
 	return newRawNode(config, nil)
 }
@@ -136,15 +136,20 @@ func (rn *RawNode) destroy() {
 	if rn == nil || rn.p == nil {
 		return
 	}
-	if rn.pendingReady != nil {
-		C.raft_ready_destroy(rn.pendingReady)
-		rn.pendingReady = nil
-	}
+	rn.discardPendingReady()
 	C.raft_raw_node_destroy(rn.p)
 	rn.p = nil
 	rn.storageHandle.Delete()
 	rn.storageHandle = 0
 	runtime.SetFinalizer(rn, nil)
+}
+
+func (rn *RawNode) discardPendingReady() {
+	if rn.pendingReady == nil {
+		return
+	}
+	C.raft_ready_destroy(rn.pendingReady)
+	rn.pendingReady = nil
 }
 
 func (rn *RawNode) ensureOpen() error {
@@ -300,9 +305,9 @@ func (rn *RawNode) step(message *pb.Message, forNode bool) error {
 
 func (rn *RawNode) Ready() Ready {
 	rn.panicOnError("Ready", rn.ensureOpen())
-	if rn.pendingReady != nil {
-		rn.panicOnError("Ready", errors.New("Ready called with an unaccepted preview"))
-	}
+	// A readyWithoutAccept preview is read-only and carries no obligation.
+	// Match Go RawNode by allowing a later preview/Ready to replace it.
+	rn.discardPendingReady()
 	var ready *C.raft_ready_t
 	rc := C.raft_raw_node_ready(rn.p, &ready)
 	if err := decodeCError(rc); err != nil {
@@ -317,12 +322,9 @@ func (rn *RawNode) Ready() Ready {
 
 func (rn *RawNode) readyWithoutAccept() Ready {
 	rn.panicOnError("readyWithoutAccept", rn.ensureOpen())
-	if rn.pendingReady != nil {
-		rn.panicOnError(
-			"readyWithoutAccept",
-			errors.New("called with an outstanding Ready preview"),
-		)
-	}
+	// node.run may lose the Ready-channel select and preview again after
+	// processing another event. The old C-owned preview was never accepted.
+	rn.discardPendingReady()
 	var ready *C.raft_ready_t
 	rc := C.raft_raw_node_ready_without_accept(rn.p, &ready)
 	if err := decodeCError(rc); err != nil {

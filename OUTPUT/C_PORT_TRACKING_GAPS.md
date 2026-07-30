@@ -13,12 +13,12 @@ appear: public C API, Go binding, C core, tests, or documentation.
 | raftpb wire compatibility | Numeric enum drift, lost optional presence, changed ConfChange encoding, or collapsing nil and empty bytes can make peers/applications incompatible even if C unit tests pass. Borrowed `*_view_t` and owned non-view types are distinct; `bool is_nil` preserves nil/empty and null descriptors remain invalid. | ABI inventory/wrappers in Phase 2; converters in Phase 3; maintained in all protocol phases; end-to-end in Phase 12. | C ABI, binding, protocol core, wire tests, docs. |
 | `ConfChangeV2` and joint consensus | Multi-change replacement requires dual quorums, learners-next, auto-leave, and explicit/implicit transition semantics. A V1-only port is unsafe/incomplete. | Conversion skeleton in Phase 3; quorum/config implementation in Phase 7; snapshot ConfState in Phase 8. | C API/types, binding, core, tests. |
 | Config validation/defaults | Zero has field-specific meanings, integer narrowing can wrap, and lease reads require CheckQuorum. Different defaults cause differential divergence. | Basic constructor checks in Phase 2; binding range checks in Phase 3; full field use in Phases 5-11. | Public API, binding, core, table tests, docs. |
-| `IsLocalMsg` | Public RawNode Step rejects unexpected local messages, while Node/internal storage paths legitimately step them. | Numeric table in Phase 2-3; Step behavior Phase 6; async message cases Phase 11. | C core, Go binding, Node integration, tests. |
-| `IsResponseMsg` | Responses from unknown peers produce RawNode error/filter behavior; local storage senders are exempt. | Binding/error identity in Phase 3; core filtering in Phases 6-7; local exceptions Phase 11. | C core, binding, errors, differential tests. |
+| `IsLocalMsg` | Public RawNode Step rejects unexpected local messages, while Node/internal storage paths legitimately step them. | Numeric table in Phase 2-3; Step behavior Phase 6; async message cases completed in Phase 12. | C core, Go binding, Node integration, tests. |
+| `IsResponseMsg` | Responses from unknown peers produce RawNode error/filter behavior; local storage senders are exempt. | Binding/error identity in Phase 3; core filtering in Phases 6-7; local exceptions completed in Phase 12. | C core, binding, errors, differential tests. |
 | `IsEmptyHardState` | Ready presence is not the same as numeric zeros. Incorrect emptiness emits/drops persistence work. | ABI presence in Phase 2-3; Ready implementation Phase 6. | C Ready API, converters, core, tests. |
 | `IsEmptySnap` | Snapshot emptiness is metadata index zero, not nil Data or term zero. | Converter rules Phase 3; log/snapshot logic Phases 5 and 8. | Binding, C core, Ready ownership, tests. |
 | Ready ownership and deep copies | Go transport/application outlives C calls. Borrowed C pointers create use-after-free and violate cgo rules. `*_view_t` input is never retained/freed; non-view output is always owned and recursively freed. C shims must construct pointer-bearing view descriptors outside Go memory. | View/owned/copy/free APIs Phase 2; C-side binding builders Phase 3; callback allocations Phase 4; Ready Phase 6; snapshots Phase 8. | Public API, binding, C allocation code, sanitizers, docs. |
-| Ready preview/accept/Advance | Node must not consume a preview until channel delivery succeeds, and Advance must work after C output is freed. | Symbols Phase 2; binding Phase 3; semantics Phase 6; async completion Phase 11. | C API, binding, core, Node actor, tests. |
+| Ready preview/accept/Advance | Node must not consume a preview until channel delivery succeeds, and Advance must work after C output is freed. | Symbols Phase 2; binding Phase 3; semantics Phase 6; async completion and replaceable previews completed in Phase 12. | C API, binding, core, Node actor, tests. |
 | Go-allocated pointer-containing descriptors | Passing `&C.raft_message_view_t{...}` or `&C.raft_byte_view_t{...}` when the object is Go memory containing Go pointers can violate cgo pointer rules. | Flat scalar shims and aggregate C-allocation contract Phase 2; binding implementation/cgocheck tests Phase 3. | C shim API, Go binding, tests, docs. |
 | Cgo call batching | Per-field/per-entry builder calls are safe but can multiply transition overhead on Step/Bootstrap/ConfChange and Ready conversion. | Single-shot descriptor design Phase 2; implementation/benchmarks Phase 3; end-to-end profiling Phase 12. | Go binding, C conversion helpers, benchmarks, docs. |
 | `MaxUncommittedEntriesSize` | It bounds leader memory and intentionally returns proposal-dropped. Omitting it changes overload behavior. | Config in Phase 2-3; accounting in Phase 6; multinode/differential tests Phase 7/12. | Config API, C core, error mapping, tests. |
@@ -27,7 +27,7 @@ appear: public C API, Go binding, C core, tests, or documentation.
 | `Peer.Context` nil/empty/lifetime | Bootstrap context is opaque application data copied into legacy ConfChange entries. `raft_peer_view_t.context` is borrowed; losing its `is_nil` shape or retaining its pointer changes committed application input or violates lifetime rules. | Peer ABI Phase 2; C-side descriptor construction/deep-copy and protobuf conversion Phase 3; Bootstrap Phase 5/7. | C API, binding, wire/ownership tests. |
 | Explicit error mapping | The expanded skeleton now separates not-implemented, storage-unavailable, peer-not-found, callback panic, OOM, and fatal errors. Phase 3 must preserve their Go mappings and later phases must return them correctly. | Enum established in Phase 2; wrapper mapping Phase 3; callback mapping Phase 4; maintain throughout. | C API, binding, callbacks, core, tests, docs. |
 | `with_tla` / `TraceLogger` build behavior | TraceLogger has a real method only under `with_tla`; otherwise it is an empty interface and hooks are no-ops. A hard-coded bridge can fail one build or alter timing/reentrancy. | Decide in Phase 3; optional bridge with logger work; validate in Phase 12. | Go binding/build tags, optional callbacks, tests, docs. |
-| AsyncStorageWrites local targets | Local append/apply IDs are reserved endpoints; same-target ordering, durability, response delivery, and prohibition of Advance are correctness rules. | Sentinels in Phase 2; conversion in Phase 3; full behavior Phase 11. | C API/core, binding, application routing, tests. |
+| AsyncStorageWrites local targets | Local append/apply IDs are reserved endpoints; same-target ordering, durability, response delivery, and prohibition of Advance are correctness rules. | Sentinels in Phase 2; conversion in Phase 3; full behavior completed in Phase 12. | C API/core, binding, application routing, tests. |
 | `MsgSnap` completion feedback | Leader progress stays paused while snapshot is outstanding. Failure must be reported after transport completes, which can outlive Ready. | Ownership in Phase 3; snapshot core in Phase 8; integration Phase 12. | Ready/message ABI, binding, transport, C core, tests. |
 | Storage callback result ownership/batching | Exported Go callbacks cannot return Go Entry/Snapshot memory for C retention, and Entries must not callback once per entry. | Owned callback ABI Phase 2; batched deep-copy bridge completed in Phase 5; private C log consumption and ownership cleanup completed in Phase 6; consensus and end-to-end tests remain later/Phase 12. | Callback ABI, Go bridge, C ownership/free code, tests, docs. |
 
@@ -93,7 +93,7 @@ must not be inferred from the minimal implementation:
 The constructor or operation returns `RAFT_ERR_NOT_IMPLEMENTED` where silently
 approximating these features would be unsafe.
 
-## Subsequent closure through Phase 11
+## Subsequent closure through Phase 13
 
 Later phases supersede the Phase 7 snapshot above:
 
@@ -105,6 +105,11 @@ Later phases supersede the Phase 7 snapshot above:
 - Phase 11 completed PreVote, leadership transfer, `MsgTimeoutNow`,
   transfer-aware CheckQuorum lease handling, and the committed-but-unapplied
   configuration guard before campaigns.
+- Phase 12 completed `msgsAfterAppend`, synchronous `stepsOnAdvance`, async
+  append/apply work generation, ordered nested responses, stable-only apply
+  pipelining, storage response handling, and the Advance prohibition.
+- Phase 13 completed `ReportUnreachable`/`MsgUnreachable`, using the existing
+  tracker transition to abandon optimistic replication without changing
+  quorum activity or generating immediate Ready work.
 
-ReportUnreachable, randomized election timeouts, and AsyncStorageWrites
-remain open.
+Randomized election timeouts remain open.

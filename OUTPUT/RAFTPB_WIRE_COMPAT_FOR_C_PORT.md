@@ -212,6 +212,13 @@ values, but exact wire-size parity must be retested if optional/presence-aware
 fields are added. This is a documented boundary gap, not permission to size
 only `Entry.Data`.
 
+Phase 12 handles the presence-sensitive `MsgStorageAppend` HardState tuple at
+the Go output conversion boundary. A C-generated all-zero term/vote/commit
+tuple is returned as three absent fields; otherwise all three are present.
+This is unambiguous because a valid changed Raft HardState cannot transition
+back to all zero values. Exhaustive optional presence for other message and
+entry scalars remains a boundary gap.
+
 ### `Message.Context`
 
 Context carries protocol-specific opaque data, including heartbeat read-index

@@ -274,8 +274,7 @@ static void test_lifecycle_and_minimal_core(void) {
     // helper; it does not require a separate two-ID C RawNode function.
     assert(raft_raw_node_step_for_node(raw_node, &transfer_message) ==
            RAFT_OK);
-    assert(raft_raw_node_report_unreachable(raw_node, 2) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_report_unreachable(raw_node, 2) == RAFT_OK);
     assert(raft_raw_node_report_snapshot(raw_node, 2,
                                          RAFT_SNAPSHOT_FAILURE) ==
            RAFT_OK);

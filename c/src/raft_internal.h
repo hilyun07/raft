@@ -18,20 +18,8 @@
 #include "raft_core.h"
 
 enum {
-    RAFT_RAW_NODE_ABI_VERSION = 14,
+    RAFT_RAW_NODE_ABI_VERSION = 15,
 };
-
-typedef struct raft_ready_completion {
-    bool has_stable_entry;
-    uint64_t stable_index;
-    uint64_t stable_term;
-    bool has_stable_snapshot;
-    uint64_t stable_snapshot_index;
-    bool has_applied;
-    uint64_t applied_index;
-    uint64_t applied_size;
-    uint64_t applied_payload_size;
-} raft_ready_completion_t;
 
 // The public header intentionally exposes only typedef struct raft_raw_node.
 struct raft_raw_node {
@@ -45,7 +33,7 @@ struct raft_raw_node {
     raft_hard_state_t previous_hard_state;
     uint64_t ready_generation;
     bool ready_accepted;
-    raft_ready_completion_t completion;
+    raft_message_vec_t steps_on_advance;
 };
 
 #endif  // ETCD_RAFT_RAFT_INTERNAL_H

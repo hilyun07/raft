@@ -250,7 +250,8 @@ static raft_progress_t progress_for(raft_raw_node_t *node, uint64_t id) {
     return progress;
 }
 
-static void elect_with_two_voters(raft_raw_node_t *node) {
+static void elect_with_two_voters(raft_raw_node_t *node,
+                                  snapshot_storage_t *storage) {
     const raft_message_view_t vote = {
         .type = RAFT_MSG_VOTE_RESP,
         .to = 1,
@@ -258,7 +259,16 @@ static void elect_with_two_voters(raft_raw_node_t *node) {
         .term = 2,
         .context = {NULL, 0, true},
     };
+    raft_ready_t *ready = NULL;
+
     assert(raft_raw_node_campaign(node) == RAFT_OK);
+    assert(raft_raw_node_ready(node, &ready) == RAFT_OK);
+    assert(ready != NULL);
+    if (ready->has_hard_state) {
+        storage->hard_state = ready->hard_state;
+    }
+    raft_ready_destroy(ready);
+    assert(raft_raw_node_advance(node) == RAFT_OK);
     assert(raft_raw_node_step(node, &vote) == RAFT_OK);
 }
 
@@ -303,7 +313,7 @@ static void test_leader_snapshot_send_and_report(void) {
     const raft_message_t *message;
     raft_progress_t progress;
 
-    elect_with_two_voters(node);
+    elect_with_two_voters(node, &storage);
     reject_compacted_append(node);
     data[0] = 'X';
 
@@ -321,6 +331,19 @@ static void test_leader_snapshot_send_and_report(void) {
     progress = progress_for(node, 2);
     assert(progress.state == RAFT_PROGRESS_STATE_SNAPSHOT);
     assert(progress.pending_snapshot == 5);
+    {
+        const raft_progress_t before = progress;
+        assert(raft_raw_node_report_unreachable(node, 2) == RAFT_OK);
+        progress = progress_for(node, 2);
+        assert(progress.state == before.state);
+        assert(progress.match_index == before.match_index);
+        assert(progress.next_index == before.next_index);
+        assert(progress.pending_snapshot == before.pending_snapshot);
+        assert(progress.recent_active == before.recent_active);
+        assert(progress.message_flow_paused ==
+               before.message_flow_paused);
+        assert(progress.is_learner == before.is_learner);
+    }
     raft_ready_destroy(ready);
     ready = NULL;
 
@@ -369,7 +392,7 @@ static void test_snapshot_temporarily_unavailable_retries(void) {
     storage.snapshot_result =
         RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE;
     node = new_node(1, &storage);
-    elect_with_two_voters(node);
+    elect_with_two_voters(node, &storage);
     reject_compacted_append(node);
     assert(storage.snapshot_calls == 1);
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
@@ -406,7 +429,7 @@ static void test_append_response_can_abort_snapshot(void) {
 
     storage.snapshot_data_is_nil = true;
     node = new_node(1, &storage);
-    elect_with_two_voters(node);
+    elect_with_two_voters(node, &storage);
     reject_compacted_append(node);
     assert(raft_raw_node_step(
                node,
@@ -458,7 +481,7 @@ static void test_snapshot_storage_error_propagates(void) {
     storage.snapshot_data_is_nil = true;
     storage.snapshot_result = RAFT_ERR_STORAGE_UNAVAILABLE;
     node = new_node(1, &storage);
-    elect_with_two_voters(node);
+    elect_with_two_voters(node, &storage);
     assert(raft_raw_node_step(node, &rejection) ==
            RAFT_ERR_STORAGE_UNAVAILABLE);
     raft_raw_node_destroy(node);
