@@ -594,6 +594,100 @@ static void test_append_heartbeat_and_follower_proposal(void) {
     raft_raw_node_destroy(node);
 }
 
+static void test_append_rejection_log_term_optimization(void) {
+    const uint64_t voters[] = {1, 2};
+    const struct {
+        uint64_t log_term;
+        uint64_t next_index;
+        uint64_t append_index;
+        uint64_t append_log_term;
+    } cases[] = {
+        {1, 1, 0, 0},
+        {0, 100, 99, 2},
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        test_storage_t storage = {
+            .hard_state = {.term = 1},
+            .voters = voters,
+            .voter_count = 2,
+        };
+        raft_storage_ops_t ops = storage_ops(&storage);
+        raft_config_t cfg = config(1);
+        raft_raw_node_t *node = NULL;
+        raft_entry_t entries[100];
+        raft_progress_internal_t *progress;
+        raft_ready_t *ready = NULL;
+        const raft_message_t *append;
+        uint64_t last_index;
+        size_t j;
+        const raft_message_view_t rejection = {
+            .type = RAFT_MSG_APP_RESP,
+            .to = 1,
+            .from = 2,
+            .term = 2,
+            .log_term = cases[i].log_term,
+            .index = 100,
+            .reject = true,
+            .reject_hint = 99,
+            .context = {NULL, 0, true},
+        };
+
+        assert(raft_raw_node_new(&cfg, &ops, &node) == RAFT_OK);
+        memset(entries, 0, sizeof(entries));
+        for (j = 0; j < sizeof(entries) / sizeof(entries[0]); ++j) {
+            entries[j].type = RAFT_ENTRY_NORMAL;
+            entries[j].term = 2;
+            entries[j].index = (uint64_t)j + 1;
+            entries[j].data.is_nil = true;
+        }
+        assert(raft_log_append(
+                   &node->log,
+                   entries,
+                   sizeof(entries) / sizeof(entries[0]),
+                   &last_index) == RAFT_OK);
+        assert(last_index == 100);
+        assert(raft_raw_node_campaign(node) == RAFT_OK);
+        assert(raft_raw_node_step(
+                   node,
+                   &(raft_message_view_t){
+                       .type = RAFT_MSG_VOTE_RESP,
+                       .to = 1,
+                       .from = 1,
+                       .term = 2,
+                       .context = {NULL, 0, true},
+                   }) == RAFT_OK);
+        assert(raft_raw_node_step(
+                   node,
+                   &(raft_message_view_t){
+                       .type = RAFT_MSG_VOTE_RESP,
+                       .to = 1,
+                       .from = 2,
+                       .term = 2,
+                       .context = {NULL, 0, true},
+                   }) == RAFT_OK);
+        raft_core_clear_messages(&node->raft);
+        raft_core_clear_messages_after_append(&node->raft);
+
+        progress = raft_tracker_find(&node->raft.tracker, 2);
+        assert(progress != NULL);
+        assert(progress->state == RAFT_PROGRESS_STATE_PROBE);
+        assert(progress->next_index == 101);
+
+        assert(raft_raw_node_step(node, &rejection) == RAFT_OK);
+        assert(progress->next_index == cases[i].next_index);
+        assert(raft_raw_node_ready_without_accept(node, &ready) ==
+               RAFT_OK);
+        append = find_message(ready, RAFT_MSG_APP, 2);
+        assert(append != NULL);
+        assert(append->index == cases[i].append_index);
+        assert(append->log_term == cases[i].append_log_term);
+        raft_ready_destroy(ready);
+        raft_raw_node_destroy(node);
+    }
+}
+
 static void test_commit_only_ready_does_not_require_sync(void) {
     const uint64_t voters[] = {1};
     test_storage_t storage = {
@@ -1517,6 +1611,7 @@ int main(void) {
     test_tick_starts_single_node_election();
     test_vote_grant_reject_and_higher_term_stepdown();
     test_append_heartbeat_and_follower_proposal();
+    test_append_rejection_log_term_optimization();
     test_commit_only_ready_does_not_require_sync();
     test_election_replication_and_step_layering();
     test_unsupported_configuration_is_explicit();

@@ -1757,10 +1757,23 @@ static int core_handle_append_response(
     }
     progress->recent_active = true;
     if (message->reject) {
+        uint64_t next_probe_index = message->reject_hint;
+        if (message->log_term > 0) {
+            uint64_t next_probe_term;
+            result = raft_log_find_conflict_by_term(
+                raft->log,
+                message->reject_hint,
+                message->log_term,
+                &next_probe_index,
+                &next_probe_term);
+            if (result != RAFT_OK) {
+                return result;
+            }
+        }
         if (!raft_progress_maybe_decr_to(
                 progress,
                 message->index,
-                message->reject_hint)) {
+                next_probe_index)) {
             return RAFT_OK;
         }
         if (progress->state == RAFT_PROGRESS_STATE_REPLICATE) {
