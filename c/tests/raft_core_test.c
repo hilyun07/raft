@@ -1888,6 +1888,384 @@ static void test_lease_read_and_check_quorum(void) {
     raft_raw_node_destroy(node);
 }
 
+static raft_raw_node_t *new_single_node_leader(
+    test_storage_t *storage, raft_config_t cfg) {
+    raft_raw_node_t *node = new_node_with_config(cfg, storage);
+    size_t iterations = 0;
+
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    while (raft_raw_node_has_ready(node)) {
+        assert(iterations++ < 8);
+        accept_and_advance(node, storage);
+    }
+    assert(node->raft.state == RAFT_STATE_LEADER);
+    return node;
+}
+
+static void test_empty_message_proposal_semantics(void) {
+    const uint64_t single_voter[] = {1};
+    const uint64_t two_voters[] = {1, 2};
+    raft_entry_view_t dummy_entry = {
+        .type = RAFT_ENTRY_NORMAL,
+        .data = {NULL, 0, true},
+    };
+    size_t i;
+
+    // A leader treats both zero-entry representations as fatal invariants.
+    for (i = 0; i < 2; ++i) {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = single_voter,
+            .voter_count = 1,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_config_t cfg = config(1);
+        raft_raw_node_t *node;
+        raft_message_view_t proposal = {
+            .type = RAFT_MSG_PROP,
+            .to = 1,
+            .from = 1,
+            .entries = {
+                .items = i == 0 ? NULL : &dummy_entry,
+                .len = 0,
+            },
+            .context = {NULL, 0, true},
+        };
+        uint64_t before_last;
+        uint64_t after_last;
+
+        cfg.applied = 1;
+        node = new_single_node_leader(&storage, cfg);
+        assert(raft_log_last_index(&node->log, &before_last) == RAFT_OK);
+        assert(raft_raw_node_step(node, &proposal) == RAFT_ERR_FATAL);
+        assert(node->raft.error == RAFT_ERR_FATAL);
+        assert(raft_log_last_index(&node->log, &after_last) == RAFT_OK);
+        assert(after_last == before_last);
+        assert(raft_raw_node_step(node, &proposal) == RAFT_ERR_FATAL);
+        raft_raw_node_destroy(node);
+    }
+
+    // A follower with a known leader forwards a zero-entry proposal unchanged.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = two_voters,
+            .voter_count = 2,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_raw_node_t *node = new_node(1, &storage);
+        raft_ready_t *ready = NULL;
+        const raft_message_view_t heartbeat = {
+            .type = RAFT_MSG_HEARTBEAT,
+            .to = 1,
+            .from = 2,
+            .term = 1,
+            .commit = 1,
+            .context = {NULL, 0, true},
+        };
+        const raft_message_view_t proposal = {
+            .type = RAFT_MSG_PROP,
+            .to = 1,
+            .from = 1,
+            .context = {NULL, 0, true},
+        };
+        const raft_message_t *forwarded;
+
+        assert(raft_raw_node_step(node, &heartbeat) == RAFT_OK);
+        accept_and_advance(node, &storage);
+        assert(node->raft.state == RAFT_STATE_FOLLOWER);
+        assert(node->raft.lead == 2);
+        assert(raft_raw_node_step(node, &proposal) == RAFT_OK);
+        assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+        forwarded = find_message(ready, RAFT_MSG_PROP, 2);
+        assert(forwarded != NULL);
+        assert(forwarded->entries.len == 0);
+        assert(node->raft.uncommitted_size == 0);
+        raft_ready_destroy(ready);
+        raft_raw_node_destroy(node);
+    }
+
+    // A candidate drops proposals before leader-only empty-message checking.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = two_voters,
+            .voter_count = 2,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_raw_node_t *node = new_node(1, &storage);
+        const raft_message_view_t proposal = {
+            .type = RAFT_MSG_PROP,
+            .to = 1,
+            .from = 1,
+            .context = {NULL, 0, true},
+        };
+
+        assert(raft_raw_node_campaign(node) == RAFT_OK);
+        assert(node->raft.state == RAFT_STATE_CANDIDATE);
+        assert(raft_raw_node_step(node, &proposal) ==
+               RAFT_ERR_PROPOSAL_DROPPED);
+        assert(node->raft.error == RAFT_OK);
+        raft_raw_node_destroy(node);
+    }
+
+    // Go checks for zero entries before checking whether a leader was removed.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = two_voters,
+            .voter_count = 2,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_config_t cfg = config(1);
+        raft_raw_node_t *node;
+        raft_message_view_t proposal = {
+            .type = RAFT_MSG_PROP,
+            .to = 1,
+            .from = 1,
+            .context = {NULL, 0, true},
+        };
+
+        cfg.applied = 1;
+        node = new_node_with_config(cfg, &storage);
+        elect_three_node_leader(node, &storage, 2);
+        while (raft_raw_node_has_ready(node)) {
+            accept_and_advance(node, &storage);
+        }
+        apply_voter_change(node, RAFT_CONF_CHANGE_REMOVE_NODE, 1);
+        assert(node->raft.state == RAFT_STATE_LEADER);
+        assert(!raft_tracker_has_progress(&node->raft.tracker, 1));
+        proposal.entries.items = &dummy_entry;
+        proposal.entries.len = 1;
+        assert(raft_raw_node_step(node, &proposal) ==
+               RAFT_ERR_PROPOSAL_DROPPED);
+        proposal.entries.items = NULL;
+        proposal.entries.len = 0;
+        assert(raft_raw_node_step(node, &proposal) == RAFT_ERR_FATAL);
+        assert(node->raft.error == RAFT_ERR_FATAL);
+        raft_raw_node_destroy(node);
+    }
+}
+
+static void test_empty_entry_proposal_semantics(void) {
+    const uint64_t voters[] = {1};
+    const uint8_t payload = 'x';
+
+    // Empty Data is a valid payload. Metadata is cloned, while proposal
+    // Term/Index are overwritten with the leader's current values.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = voters,
+            .voter_count = 1,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_config_t cfg = config(1);
+        raft_raw_node_t *node;
+        raft_ready_t *ready = NULL;
+        raft_entry_view_t entries[] = {
+            {
+                .type = RAFT_ENTRY_NORMAL,
+                .term = 99,
+                .index = 99,
+                .data = {NULL, 0, true},
+                .protobuf = {
+                    .fields =
+                        RAFT_ENTRY_PROTO_TERM | RAFT_ENTRY_PROTO_INDEX,
+                    .unknown_fields = {NULL, 0, true},
+                },
+            },
+            {
+                .type = RAFT_ENTRY_NORMAL,
+                .data = {NULL, 0, false},
+                .protobuf = {
+                    .fields = RAFT_ENTRY_PROTO_TYPE,
+                    .unknown_fields = {NULL, 0, true},
+                },
+            },
+            {
+                .type = RAFT_ENTRY_NORMAL,
+                .data = {&payload, 1, false},
+                .protobuf = {
+                    .unknown_fields = {NULL, 0, true},
+                },
+            },
+        };
+        const raft_message_view_t proposal = {
+            .type = RAFT_MSG_PROP,
+            .to = 1,
+            .from = 1,
+            .entries = {
+                .items = entries,
+                .len = sizeof(entries) / sizeof(entries[0]),
+            },
+            .context = {NULL, 0, true},
+        };
+        uint64_t before_last;
+        size_t i;
+
+        cfg.applied = 1;
+        node = new_single_node_leader(&storage, cfg);
+        assert(raft_log_last_index(&node->log, &before_last) == RAFT_OK);
+        assert(raft_raw_node_step(node, &proposal) == RAFT_OK);
+        assert(node->raft.uncommitted_size == 1);
+        assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+        assert(ready->entries.len == 3);
+        for (i = 0; i < ready->entries.len; ++i) {
+            assert(ready->entries.items[i].term == node->raft.term);
+            assert(ready->entries.items[i].index ==
+                   before_last + (uint64_t)i + 1);
+        }
+        assert(ready->entries.items[0].data.is_nil);
+        assert(ready->entries.items[0].data.len == 0);
+        assert(!ready->entries.items[1].data.is_nil);
+        assert(ready->entries.items[1].data.len == 0);
+        assert(ready->entries.items[2].data.len == 1);
+        assert(ready->entries.items[2].data.data[0] == payload);
+        assert((ready->entries.items[0].protobuf.fields &
+                RAFT_ENTRY_PROTO_TERM) != 0);
+        assert((ready->entries.items[1].protobuf.fields &
+                RAFT_ENTRY_PROTO_TYPE) != 0);
+        raft_ready_destroy(ready);
+        raft_raw_node_destroy(node);
+    }
+
+    // A full uncommitted-size budget still admits any number of entries whose
+    // aggregate Data length is zero, but rejects a mixed positive-size batch.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = voters,
+            .voter_count = 1,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_config_t cfg = config(1);
+        raft_raw_node_t *node;
+        const uint8_t oversized_data[] = {'l', 'a', 'r', 'g', 'e'};
+        const raft_byte_view_t oversized = {
+            .data = oversized_data,
+            .len = sizeof(oversized_data),
+            .is_nil = false,
+        };
+        raft_entry_view_t empty_entries[] = {
+            {
+                .type = RAFT_ENTRY_NORMAL,
+                .data = {NULL, 0, true},
+            },
+            {
+                .type = RAFT_ENTRY_NORMAL,
+                .data = {NULL, 0, false},
+            },
+        };
+        raft_entry_view_t mixed_entries[] = {
+            {
+                .type = RAFT_ENTRY_NORMAL,
+                .data = {NULL, 0, true},
+            },
+            {
+                .type = RAFT_ENTRY_NORMAL,
+                .data = {&payload, 1, false},
+            },
+        };
+        raft_message_view_t proposal = {
+            .type = RAFT_MSG_PROP,
+            .to = 1,
+            .from = 1,
+            .entries = {
+                .items = empty_entries,
+                .len =
+                    sizeof(empty_entries) / sizeof(empty_entries[0]),
+            },
+            .context = {NULL, 0, true},
+        };
+        uint64_t before_mixed;
+        uint64_t after_mixed;
+
+        cfg.applied = 1;
+        cfg.max_uncommitted_entries_size = 4;
+        node = new_single_node_leader(&storage, cfg);
+        assert(raft_raw_node_propose(node, &oversized) == RAFT_OK);
+        assert(node->raft.uncommitted_size == 5);
+        assert(raft_raw_node_step(node, &proposal) == RAFT_OK);
+        assert(node->raft.uncommitted_size == 5);
+        assert(raft_log_last_index(&node->log, &before_mixed) == RAFT_OK);
+        proposal.entries.items = mixed_entries;
+        proposal.entries.len =
+            sizeof(mixed_entries) / sizeof(mixed_entries[0]);
+        assert(raft_raw_node_step(node, &proposal) ==
+               RAFT_ERR_PROPOSAL_DROPPED);
+        assert(node->raft.uncommitted_size == 5);
+        assert(raft_log_last_index(&node->log, &after_mixed) == RAFT_OK);
+        assert(after_mixed == before_mixed);
+        raft_raw_node_destroy(node);
+    }
+
+    // Empty configuration-change Data remains meaningful because Entry.Type
+    // selects decoding and validation independently of payload size.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = voters,
+            .voter_count = 1,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_config_t cfg = config(1);
+        raft_raw_node_t *node;
+        raft_ready_t *ready = NULL;
+        raft_entry_view_t entry = {
+            .type = RAFT_ENTRY_CONF_CHANGE_V2,
+            .data = {NULL, 0, true},
+            .protobuf = {
+                .fields = RAFT_ENTRY_PROTO_TYPE,
+                .unknown_fields = {NULL, 0, true},
+            },
+        };
+        raft_message_view_t proposal = {
+            .type = RAFT_MSG_PROP,
+            .to = 1,
+            .from = 1,
+            .entries = {.items = &entry, .len = 1},
+            .context = {NULL, 0, true},
+        };
+        size_t iterations = 0;
+
+        cfg.applied = 1;
+        node = new_single_node_leader(&storage, cfg);
+        assert(raft_raw_node_step(node, &proposal) == RAFT_OK);
+        assert(raft_raw_node_ready(node, &ready) == RAFT_OK);
+        assert(ready->entries.len == 1);
+        assert(ready->entries.items[0].type == RAFT_ENTRY_NORMAL);
+        assert(ready->entries.items[0].data.is_nil);
+        persist_ready(&storage, ready);
+        raft_ready_destroy(ready);
+        assert(raft_raw_node_advance(node) == RAFT_OK);
+        while (raft_raw_node_has_ready(node)) {
+            assert(iterations++ < 8);
+            accept_and_advance(node, &storage);
+        }
+
+        entry.type = RAFT_ENTRY_CONF_CHANGE;
+        entry.data.is_nil = false;
+        assert(raft_raw_node_step(node, &proposal) == RAFT_OK);
+        assert(node->raft.pending_conf_index != 0);
+        assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+        assert(ready->entries.len == 1);
+        assert(ready->entries.items[0].type ==
+               RAFT_ENTRY_CONF_CHANGE);
+        assert(!ready->entries.items[0].data.is_nil);
+        assert(ready->entries.items[0].data.len == 0);
+        raft_ready_destroy(ready);
+        raft_raw_node_destroy(node);
+    }
+}
+
 static void test_uncommitted_proposal_limit(void) {
     const uint64_t voters[] = {1};
     test_storage_t storage = {
@@ -2320,6 +2698,8 @@ int main(void) {
     test_transfer_forwarding_and_forced_campaign();
     test_safe_read_index_and_stepdown();
     test_lease_read_and_check_quorum();
+    test_empty_message_proposal_semantics();
+    test_empty_entry_proposal_semantics();
     test_uncommitted_proposal_limit();
     test_status_progress_inflights();
     test_report_unreachable_paths();

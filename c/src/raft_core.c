@@ -2074,6 +2074,9 @@ static int core_step_leader(raft_t *raft,
         case RAFT_MSG_PROP: {
             raft_entry_view_t *entries = NULL;
             int result;
+            if (message->entries.len == 0) {
+                return RAFT_ERR_FATAL;
+            }
             if (!core_is_voter(raft, raft->id) ||
                 raft->lead_transferee != RAFT_NONE) {
                 return RAFT_ERR_PROPOSAL_DROPPED;
