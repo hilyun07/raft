@@ -21,6 +21,7 @@ OBJECTS := \
 TEST_BINARIES := \
 	$(BUILD_DIR)/raw_node_skeleton_test \
 	$(BUILD_DIR)/raft_core_test \
+	$(BUILD_DIR)/snapshot_test \
 	$(BUILD_DIR)/tracker_test \
 	$(BUILD_DIR)/confchange_test \
 	$(BUILD_DIR)/unstable_test \
@@ -67,6 +68,10 @@ $(BUILD_DIR)/raft_core_test: tests/raft_core_test.c include/raft/raft.h $(LIBRAR
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
 
+$(BUILD_DIR)/snapshot_test: tests/snapshot_test.c include/raft/raft.h $(LIBRARY)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
+		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
+
 $(BUILD_DIR)/tracker_test: tests/tracker_test.c src/tracker.h include/raft/raft.h $(LIBRARY)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
@@ -87,6 +92,7 @@ $(BUILD_DIR)/log_test: tests/log_test.c src/log.h src/unstable.h include/raft/ra
 test: $(TEST_BINARIES)
 	$(BUILD_DIR)/raw_node_skeleton_test
 	$(BUILD_DIR)/raft_core_test
+	$(BUILD_DIR)/snapshot_test
 	$(BUILD_DIR)/tracker_test
 	$(BUILD_DIR)/confchange_test
 	$(BUILD_DIR)/unstable_test

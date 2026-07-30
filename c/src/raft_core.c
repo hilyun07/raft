@@ -535,6 +535,42 @@ static int core_send_vote_request(raft_t *raft, uint64_t to) {
     return result;
 }
 
+static int core_maybe_send_snapshot(
+    raft_t *raft, raft_progress_internal_t *progress) {
+    raft_message_t message;
+    int result;
+
+    if (raft == NULL || progress == NULL ||
+        progress->id == raft->id) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    if (!progress->recent_active) {
+        return RAFT_OK;
+    }
+
+    core_message_init(&message, RAFT_MSG_SNAP);
+    message.to = progress->id;
+    result = raft_log_snapshot(raft->log, &message.snapshot);
+    if (result == RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE) {
+        raft_message_free(&message);
+        return RAFT_OK;
+    }
+    if (result != RAFT_OK) {
+        raft_message_free(&message);
+        return result;
+    }
+    if (message.snapshot.metadata.index == 0) {
+        raft_message_free(&message);
+        return RAFT_ERR_FATAL;
+    }
+    message.has_snapshot = true;
+    raft_progress_become_snapshot(
+        progress, message.snapshot.metadata.index);
+    result = core_send(raft, &message);
+    raft_message_free(&message);
+    return result;
+}
+
 static int core_send_append(raft_t *raft,
                             raft_progress_internal_t *progress) {
     raft_message_t message;
@@ -557,6 +593,10 @@ static int core_send_append(raft_t *raft,
     previous_index = progress->next_index - 1;
     result = raft_log_term(raft->log, previous_index, &previous_term);
     if (result != RAFT_OK) {
+        if (result == RAFT_ERR_STORAGE_COMPACTED ||
+            result == RAFT_ERR_STORAGE_UNAVAILABLE) {
+            return core_maybe_send_snapshot(raft, progress);
+        }
         return result;
     }
     core_message_init(&message, RAFT_MSG_APP);
@@ -572,6 +612,10 @@ static int core_send_append(raft_t *raft,
                                   &message.entries);
         if (result != RAFT_OK) {
             raft_message_free(&message);
+            if (result == RAFT_ERR_STORAGE_COMPACTED ||
+                result == RAFT_ERR_STORAGE_UNAVAILABLE) {
+                return core_maybe_send_snapshot(raft, progress);
+            }
             return result;
         }
     }
@@ -907,6 +951,131 @@ static int core_handle_heartbeat(raft_t *raft,
     return result;
 }
 
+static bool core_snapshot_vec_contains(const raft_uint64_vec_t *ids,
+                                       uint64_t id) {
+    size_t i;
+
+    if (ids == NULL || !core_array_valid(ids->items, ids->len)) {
+        return false;
+    }
+    for (i = 0; i < ids->len; ++i) {
+        if (ids->items[i] == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool core_snapshot_contains_id(const raft_conf_state_t *state,
+                                      uint64_t id) {
+    return state != NULL &&
+           (core_snapshot_vec_contains(&state->voters, id) ||
+            core_snapshot_vec_contains(&state->learners, id) ||
+            core_snapshot_vec_contains(
+                &state->voters_outgoing, id));
+}
+
+static int core_restore_snapshot(raft_t *raft,
+                                 const raft_snapshot_t *snapshot,
+                                 bool *restored) {
+    raft_progress_tracker_t replacement;
+    int result;
+
+    if (raft == NULL || !raft_snapshot_valid(snapshot) ||
+        restored == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    *restored = false;
+    if (snapshot->metadata.index <= raft->log->committed) {
+        return RAFT_OK;
+    }
+    if (raft->state != RAFT_STATE_FOLLOWER) {
+        return RAFT_OK;
+    }
+    if (!core_snapshot_contains_id(
+            &snapshot->metadata.conf_state, raft->id)) {
+        return RAFT_OK;
+    }
+    if (raft_log_match_term(raft->log,
+                            snapshot->metadata.index,
+                            snapshot->metadata.term)) {
+        return raft_log_commit_to(
+            raft->log, snapshot->metadata.index);
+    }
+    if (snapshot->metadata.index == UINT64_MAX) {
+        return RAFT_ERR_FATAL;
+    }
+
+    memset(&replacement, 0, sizeof(replacement));
+    result = raft_tracker_init(
+        &replacement,
+        raft->tracker.max_inflight_messages,
+        raft->tracker.max_inflight_bytes);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    result = raft_confchange_restore(
+        &replacement,
+        &snapshot->metadata.conf_state,
+        snapshot->metadata.index);
+    if (result != RAFT_OK) {
+        raft_tracker_free(&replacement);
+        return result == RAFT_ERR_OUT_OF_MEMORY ? result
+                                                : RAFT_ERR_FATAL;
+    }
+    result = raft_log_restore(raft->log, snapshot);
+    if (result != RAFT_OK) {
+        raft_tracker_free(&replacement);
+        return result;
+    }
+    raft_tracker_swap(&raft->tracker, &replacement);
+    raft_tracker_free(&replacement);
+    if (raft->lead_transferee != RAFT_NONE &&
+        !raft_tracker_is_voter(
+            &raft->tracker, raft->lead_transferee)) {
+        raft->lead_transferee = RAFT_NONE;
+    }
+    *restored = true;
+    return RAFT_OK;
+}
+
+static int core_handle_snapshot(raft_t *raft,
+                                const raft_message_view_t *message) {
+    raft_snapshot_t snapshot;
+    uint64_t response_index;
+    bool restored;
+    int result;
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.data.is_nil = true;
+    if (message->has_snapshot) {
+        result = raft_snapshot_copy_from_view(
+            &snapshot, &message->snapshot);
+        if (result != RAFT_OK) {
+            return result;
+        }
+    }
+    result = core_restore_snapshot(raft, &snapshot, &restored);
+    if (result == RAFT_OK) {
+        if (restored) {
+            result = raft_log_last_index(
+                raft->log, &response_index);
+        } else {
+            response_index = raft->log->committed;
+        }
+    }
+    if (result == RAFT_OK) {
+        result = core_send_append_response(raft,
+                                           message->from,
+                                           response_index,
+                                           false,
+                                           0,
+                                           0);
+    }
+    raft_snapshot_free(&snapshot);
+    return result;
+}
+
 static int core_step_follower(raft_t *raft,
                               const raft_message_view_t *message) {
     switch (message->type) {
@@ -936,6 +1105,10 @@ static int core_step_follower(raft_t *raft,
             raft->election_elapsed = 0;
             raft->lead = message->from;
             return core_handle_heartbeat(raft, message);
+        case RAFT_MSG_SNAP:
+            raft->election_elapsed = 0;
+            raft->lead = message->from;
+            return core_handle_snapshot(raft, message);
         case RAFT_MSG_FORGET_LEADER:
             raft->lead = RAFT_NONE;
             return RAFT_OK;
@@ -961,6 +1134,13 @@ static int core_step_candidate(raft_t *raft,
                 raft, raft->term, message->from);
             return result == RAFT_OK
                        ? core_handle_heartbeat(raft, message)
+                       : result;
+        }
+        case RAFT_MSG_SNAP: {
+            int result = core_become_follower(
+                raft, raft->term, message->from);
+            return result == RAFT_OK
+                       ? core_handle_snapshot(raft, message)
                        : result;
         }
         case RAFT_MSG_VOTE_RESP:
@@ -1077,8 +1257,17 @@ static int core_handle_append_response(
             raft_progress_become_replicate(progress);
         } else if (progress->state ==
                    RAFT_PROGRESS_STATE_SNAPSHOT) {
-            raft_progress_become_probe(progress);
-            raft_progress_become_replicate(progress);
+            uint64_t first_index;
+            result = raft_log_first_index(
+                raft->log, &first_index);
+            if (result != RAFT_OK) {
+                return result;
+            }
+            if (progress->match_index == UINT64_MAX ||
+                progress->match_index + 1 >= first_index) {
+                raft_progress_become_probe(progress);
+                raft_progress_become_replicate(progress);
+            }
         } else if (progress->state ==
                    RAFT_PROGRESS_STATE_REPLICATE) {
             raft_inflights_free_le(
@@ -1146,6 +1335,20 @@ static int core_step_leader(raft_t *raft,
                 progress->state == RAFT_PROGRESS_STATE_PROBE) {
                 return core_send_append(raft, progress);
             }
+            return RAFT_OK;
+        }
+        case RAFT_MSG_SNAP_STATUS: {
+            raft_progress_internal_t *progress =
+                core_find_progress(raft, message->from);
+            if (progress == NULL ||
+                progress->state != RAFT_PROGRESS_STATE_SNAPSHOT) {
+                return RAFT_OK;
+            }
+            if (message->reject) {
+                progress->pending_snapshot = 0;
+            }
+            raft_progress_become_probe(progress);
+            progress->message_flow_paused = true;
             return RAFT_OK;
         }
         case RAFT_MSG_FORGET_LEADER:
@@ -1615,9 +1818,7 @@ int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
     }
     if (message->type == RAFT_MSG_PRE_VOTE ||
         message->type == RAFT_MSG_PRE_VOTE_RESP ||
-        message->type == RAFT_MSG_SNAP ||
         message->type == RAFT_MSG_UNREACHABLE ||
-        message->type == RAFT_MSG_SNAP_STATUS ||
         message->type == RAFT_MSG_CHECK_QUORUM ||
         message->type == RAFT_MSG_TRANSFER_LEADER ||
         message->type == RAFT_MSG_TIMEOUT_NOW ||
@@ -1632,7 +1833,8 @@ int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
     if (message->term != 0 && message->term > raft->term) {
         uint64_t lead =
             message->type == RAFT_MSG_APP ||
-                    message->type == RAFT_MSG_HEARTBEAT
+                    message->type == RAFT_MSG_HEARTBEAT ||
+                    message->type == RAFT_MSG_SNAP
                 ? message->from
                 : RAFT_NONE;
         result = core_become_follower(raft, message->term, lead);

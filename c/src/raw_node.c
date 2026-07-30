@@ -1061,6 +1061,9 @@ int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
         raw_node->completion.has_stable_snapshot = true;
         raw_node->completion.stable_snapshot_index =
             ready->snapshot.metadata.index;
+        raw_node->completion.has_applied = true;
+        raw_node->completion.applied_index =
+            ready->snapshot.metadata.index;
     }
     applying_size = entry_vec_encoding_size(&ready->committed_entries);
     payload_size = entry_vec_payload_size(&ready->committed_entries);
@@ -1243,12 +1246,19 @@ int raft_raw_node_report_unreachable(raft_raw_node_t *raw_node, uint64_t id) {
 int raft_raw_node_report_snapshot(raft_raw_node_t *raw_node,
                                   uint64_t id,
                                   raft_snapshot_status_t status) {
+    raft_message_view_t message;
+
     if (raw_node == NULL || !raft_is_valid_node_id(id) ||
         (status != RAFT_SNAPSHOT_FINISH &&
          status != RAFT_SNAPSHOT_FAILURE)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    return RAFT_ERR_NOT_IMPLEMENTED;
+    memset(&message, 0, sizeof(message));
+    message.type = RAFT_MSG_SNAP_STATUS;
+    message.from = id;
+    message.reject = status == RAFT_SNAPSHOT_FAILURE;
+    message.context.is_nil = true;
+    return raft_core_step(&raw_node->raft, &message);
 }
 
 int raft_raw_node_transfer_leader(raft_raw_node_t *raw_node,

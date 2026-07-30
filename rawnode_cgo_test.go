@@ -190,6 +190,194 @@ func cgoSingleLeader(t *testing.T) (*RawNode, *MemoryStorage) {
 	return rn, storage
 }
 
+type cgoSnapshotStorage struct {
+	*MemoryStorage
+	snapshotErr   error
+	snapshotCalls int
+}
+
+func (s *cgoSnapshotStorage) Snapshot() (*pb.Snapshot, error) {
+	s.snapshotCalls++
+	if s.snapshotErr != nil {
+		return nil, s.snapshotErr
+	}
+	return s.MemoryStorage.Snapshot()
+}
+
+func cgoCompactedSnapshotStorage(t *testing.T) *cgoSnapshotStorage {
+	t.Helper()
+	storage := &cgoSnapshotStorage{MemoryStorage: NewMemoryStorage()}
+	if err := storage.ApplySnapshot(&pb.Snapshot{
+		Data: []byte("snapshot-data"),
+		Metadata: &pb.SnapshotMetadata{
+			Index:     new(uint64(5)),
+			Term:      new(uint64(1)),
+			ConfState: &pb.ConfState{Voters: []uint64{1, 2}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return storage
+}
+
+func cgoElectSnapshotLeader(t *testing.T, storage Storage) *RawNode {
+	t.Helper()
+	cfg := cgoSkeletonConfig()
+	cfg.Storage = storage
+	rn, err := NewRawNode(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rn.Campaign(); err != nil {
+		rn.destroy()
+		t.Fatal(err)
+	}
+	if err := rn.Step(&pb.Message{
+		Type: pb.MsgVoteResp.Enum(),
+		To:   new(uint64(1)),
+		From: new(uint64(2)),
+		Term: new(uint64(1)),
+	}); err != nil {
+		rn.destroy()
+		t.Fatal(err)
+	}
+	return rn
+}
+
+func cgoRejectCompactedAppend(t *testing.T, rn *RawNode) error {
+	t.Helper()
+	return rn.Step(&pb.Message{
+		Type:       pb.MsgAppResp.Enum(),
+		To:         new(uint64(1)),
+		From:       new(uint64(2)),
+		Term:       new(uint64(1)),
+		Index:      new(uint64(5)),
+		Reject:     new(true),
+		RejectHint: new(uint64(0)),
+	})
+}
+
+func cgoProgressFor(t *testing.T, rn *RawNode, id uint64) tracker.Progress {
+	t.Helper()
+	var found bool
+	var progress tracker.Progress
+	rn.WithProgress(func(gotID uint64, _ ProgressType, pr tracker.Progress) {
+		if gotID == id {
+			found = true
+			progress = pr
+		}
+	})
+	if !found {
+		t.Fatalf("progress for %d not found", id)
+	}
+	return progress
+}
+
+func TestCGoRawNodeSnapshotSendAndReport(t *testing.T) {
+	storage := cgoCompactedSnapshotStorage(t)
+	rn := cgoElectSnapshotLeader(t, storage)
+	defer rn.destroy()
+
+	if err := cgoRejectCompactedAppend(t, rn); err != nil {
+		t.Fatal(err)
+	}
+	rd := rn.Ready()
+	var snapMessage *pb.Message
+	for _, message := range rd.Messages {
+		if message.GetType() == pb.MsgSnap && message.GetTo() == 2 {
+			snapMessage = message
+		}
+	}
+	if snapMessage == nil || snapMessage.GetSnapshot() == nil {
+		t.Fatalf("Ready messages contain no snapshot: %+v", rd.Messages)
+	}
+	if rd.Snapshot != nil {
+		t.Fatalf("outbound MsgSnap also appeared as local Ready.Snapshot: %+v", rd.Snapshot)
+	}
+	if got := snapMessage.GetSnapshot(); got.GetMetadata().GetIndex() != 5 ||
+		got.GetMetadata().GetTerm() != 1 ||
+		!bytes.Equal(got.Data, []byte("snapshot-data")) ||
+		!reflect.DeepEqual(got.GetMetadata().GetConfState().Voters, []uint64{1, 2}) {
+		t.Fatalf("outbound snapshot = %+v", got)
+	}
+	if storage.snapshotCalls != 1 {
+		t.Fatalf("Snapshot calls = %d, want 1", storage.snapshotCalls)
+	}
+	cgoPersistAndAdvance(t, rn, storage.MemoryStorage, rd)
+
+	progress := cgoProgressFor(t, rn, 2)
+	if progress.State != tracker.StateSnapshot || progress.PendingSnapshot != 5 {
+		t.Fatalf("snapshot progress = %+v", progress)
+	}
+	rn.ReportSnapshot(2, SnapshotFailure)
+	progress = cgoProgressFor(t, rn, 2)
+	if progress.State != tracker.StateProbe || progress.PendingSnapshot != 0 ||
+		progress.Next != 1 || !progress.MsgAppFlowPaused {
+		t.Fatalf("failed snapshot progress = %+v", progress)
+	}
+
+	if err := rn.Step(&pb.Message{
+		Type: pb.MsgHeartbeatResp.Enum(),
+		To:   new(uint64(1)),
+		From: new(uint64(2)),
+		Term: new(uint64(1)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	progress = cgoProgressFor(t, rn, 2)
+	if progress.State != tracker.StateSnapshot || progress.PendingSnapshot != 5 {
+		t.Fatalf("retried snapshot progress = %+v", progress)
+	}
+	rn.ReportSnapshot(2, SnapshotFinish)
+	progress = cgoProgressFor(t, rn, 2)
+	if progress.State != tracker.StateProbe || progress.PendingSnapshot != 0 ||
+		progress.Next != 6 || !progress.MsgAppFlowPaused {
+		t.Fatalf("finished snapshot progress = %+v", progress)
+	}
+}
+
+func TestCGoRawNodeSnapshotTemporarilyUnavailableRetries(t *testing.T) {
+	storage := cgoCompactedSnapshotStorage(t)
+	storage.snapshotErr = ErrSnapshotTemporarilyUnavailable
+	rn := cgoElectSnapshotLeader(t, storage)
+	defer rn.destroy()
+
+	if err := cgoRejectCompactedAppend(t, rn); err != nil {
+		t.Fatal(err)
+	}
+	if progress := cgoProgressFor(t, rn, 2); progress.State != tracker.StateProbe ||
+		progress.Next != 1 {
+		t.Fatalf("temporary snapshot progress = %+v", progress)
+	}
+	storage.snapshotErr = nil
+	if err := rn.Step(&pb.Message{
+		Type: pb.MsgHeartbeatResp.Enum(),
+		To:   new(uint64(1)),
+		From: new(uint64(2)),
+		Term: new(uint64(1)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rd := rn.Ready()
+	var found bool
+	for _, message := range rd.Messages {
+		found = found || message.GetType() == pb.MsgSnap
+	}
+	if !found || storage.snapshotCalls != 2 {
+		t.Fatalf("retry found=%v Snapshot calls=%d", found, storage.snapshotCalls)
+	}
+}
+
+func TestCGoRawNodeSnapshotStorageErrorPropagates(t *testing.T) {
+	storage := cgoCompactedSnapshotStorage(t)
+	storage.snapshotErr = ErrUnavailable
+	rn := cgoElectSnapshotLeader(t, storage)
+	defer rn.destroy()
+	if err := cgoRejectCompactedAppend(t, rn); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("snapshot storage error = %v, want ErrUnavailable", err)
+	}
+}
+
 func TestCGoRawNodeLegacyConfChangeProposal(t *testing.T) {
 	rn, _ := cgoSingleLeader(t)
 	defer rn.destroy()

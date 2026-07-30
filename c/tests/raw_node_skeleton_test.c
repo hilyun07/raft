@@ -278,7 +278,7 @@ static void test_lifecycle_and_minimal_core(void) {
            RAFT_ERR_NOT_IMPLEMENTED);
     assert(raft_raw_node_report_snapshot(raw_node, 2,
                                          RAFT_SNAPSHOT_FAILURE) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
 
     raft_ready_destroy(ready);
     raft_status_free(&status);
