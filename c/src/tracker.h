@@ -49,14 +49,14 @@ typedef struct raft_progress_internal {
     bool message_flow_paused;
     bool is_learner;
     raft_inflights_internal_t inflights;
-    bool vote_recorded;
-    bool vote_granted;
 } raft_progress_internal_t;
 
 typedef struct raft_progress_tracker {
     raft_conf_state_t config;
     raft_progress_internal_t *progress;
     size_t progress_len;
+    raft_uint64_vec_t votes_granted;
+    raft_uint64_vec_t votes_rejected;
     size_t max_inflight_messages;
     uint64_t max_inflight_bytes;
 } raft_progress_tracker_t;
@@ -80,6 +80,9 @@ int raft_progress_init(raft_progress_internal_t *progress,
                        bool is_learner,
                        size_t max_inflight_messages,
                        uint64_t max_inflight_bytes);
+int raft_progress_reset(raft_progress_internal_t *progress,
+                        uint64_t match,
+                        uint64_t next);
 void raft_progress_free(raft_progress_internal_t *progress);
 int raft_progress_clone(raft_progress_internal_t *dst,
                         const raft_progress_internal_t *src);
@@ -131,9 +134,9 @@ void raft_tracker_remove_progress(raft_progress_tracker_t *tracker,
                                   uint64_t id);
 
 void raft_tracker_reset_votes(raft_progress_tracker_t *tracker);
-void raft_tracker_record_vote(raft_progress_tracker_t *tracker,
-                              uint64_t id,
-                              bool granted);
+int raft_tracker_record_vote(raft_progress_tracker_t *tracker,
+                             uint64_t id,
+                             bool granted);
 raft_vote_result_internal_t raft_tracker_vote_result(
     const raft_progress_tracker_t *tracker);
 uint64_t raft_tracker_committed(const raft_progress_tracker_t *tracker);

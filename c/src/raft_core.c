@@ -404,6 +404,7 @@ static int core_reset(raft_t *raft, uint64_t term) {
         (uint64_t)raft_random_uniform(
             &raft->random, raft->election_timeout);
     raft->uncommitted_size = 0;
+    raft->pending_conf_index = 0;
     raft_read_only_reset(&raft->read_only);
     result = raft_log_last_index(raft->log, &last_index);
     if (result != RAFT_OK) {
@@ -416,11 +417,13 @@ static int core_reset(raft_t *raft, uint64_t term) {
     for (i = 0; i < raft->tracker.progress_len; ++i) {
         raft_progress_internal_t *progress =
             &raft->tracker.progress[i];
-        progress->match_index = 0;
-        progress->next_index = last_index + 1;
-        raft_progress_reset_state(
-            progress, RAFT_PROGRESS_STATE_PROBE);
-        progress->recent_active = progress->id == raft->id;
+        uint64_t match =
+            progress->id == raft->id ? last_index : 0;
+        result = raft_progress_reset(
+            progress, match, last_index + 1);
+        if (result != RAFT_OK) {
+            return result;
+        }
     }
     return RAFT_OK;
 }
@@ -1044,12 +1047,14 @@ static int core_handle_vote_response(raft_t *raft,
     } else {
         return RAFT_OK;
     }
-    if (message->type != expected_type || progress == NULL ||
-        progress->is_learner) {
+    if (message->type != expected_type || progress == NULL) {
         return RAFT_OK;
     }
-    raft_tracker_record_vote(
+    result = raft_tracker_record_vote(
         &raft->tracker, message->from, !message->reject);
+    if (result != RAFT_OK) {
+        return result;
+    }
     vote_result = raft_tracker_vote_result(&raft->tracker);
     if (vote_result == RAFT_VOTE_WON) {
         if (raft->state == RAFT_STATE_PRE_CANDIDATE) {

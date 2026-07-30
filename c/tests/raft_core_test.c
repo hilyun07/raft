@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "raft/raft.h"
+#include "alloc.h"
 #include "raft_internal.h"
 
 #include <assert.h>
@@ -314,6 +315,223 @@ static void commit_leader_noop(raft_raw_node_t *node,
     assert(raft_raw_node_step(node, &append_response) == RAFT_OK);
 }
 
+static void step_vote_response(raft_raw_node_t *node,
+                               uint64_t from,
+                               bool reject) {
+    raft_message_view_t response = {
+        .type = RAFT_MSG_VOTE_RESP,
+        .to = 1,
+        .from = from,
+        .term = node->raft.term,
+        .reject = reject,
+        .context = {NULL, 0, true},
+    };
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+}
+
+static void apply_voter_change(raft_raw_node_t *node,
+                               raft_conf_change_type_t type,
+                               uint64_t id) {
+    raft_conf_change_single_t single = {
+        .type = type,
+        .node_id = id,
+    };
+    raft_conf_change_v2_view_t change = {
+        .transition = RAFT_CONF_CHANGE_TRANSITION_AUTO,
+        .changes = &single,
+        .changes_len = 1,
+        .context = {NULL, 0, true},
+    };
+    raft_conf_state_t state;
+
+    assert(raft_raw_node_apply_conf_change(node, &change, &state) ==
+           RAFT_OK);
+    raft_conf_state_free(&state);
+}
+
+static void assert_raft_state(raft_raw_node_t *node,
+                              raft_state_t expected) {
+    raft_basic_status_t status;
+    assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
+    assert(status.soft_state.raft_state == expected);
+}
+
+static void test_candidate_vote_ownership(void) {
+    const uint64_t voters[] = {1, 2, 3, 4, 5};
+    const uint64_t learner_voters[] = {1, 3, 4};
+    test_storage_t grant_storage = {
+        .hard_state = {.term = 1, .commit = 1},
+        .voters = voters,
+        .voter_count = 5,
+        .last_index = 1,
+        .last_term = 1,
+    };
+    test_storage_t reject_storage = grant_storage;
+    test_storage_t reset_storage = grant_storage;
+    test_storage_t allocation_storage = grant_storage;
+    test_storage_t learner_storage = {
+        .hard_state = {.term = 1, .commit = 1},
+        .voters = learner_voters,
+        .voter_count = 3,
+        .last_index = 1,
+        .last_term = 1,
+    };
+    raft_raw_node_t *node;
+
+    // A retained grant contributes again when the same voter is re-added.
+    node = new_node(1, &grant_storage);
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    assert_raft_state(node, RAFT_STATE_CANDIDATE);
+    step_vote_response(node, 2, false);
+    apply_voter_change(node, RAFT_CONF_CHANGE_REMOVE_NODE, 2);
+    assert(!raft_raw_node_has_progress(node, 2));
+    apply_voter_change(node, RAFT_CONF_CHANGE_ADD_NODE, 2);
+    assert(raft_raw_node_has_progress(node, 2));
+    step_vote_response(node, 3, false);
+    assert_raft_state(node, RAFT_STATE_CANDIDATE);
+    step_vote_response(node, 4, false);
+    assert_raft_state(node, RAFT_STATE_LEADER);
+    raft_raw_node_destroy(node);
+
+    // A retained rejection likewise contributes to a lost election.
+    node = new_node(1, &reject_storage);
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    step_vote_response(node, 2, true);
+    apply_voter_change(node, RAFT_CONF_CHANGE_REMOVE_NODE, 2);
+    apply_voter_change(node, RAFT_CONF_CHANGE_ADD_NODE, 2);
+    step_vote_response(node, 3, true);
+    assert_raft_state(node, RAFT_STATE_CANDIDATE);
+    step_vote_response(node, 4, true);
+    assert_raft_state(node, RAFT_STATE_FOLLOWER);
+    raft_raw_node_destroy(node);
+
+    // A candidate-to-candidate transition starts a new term and clears the
+    // retained vote. It takes three fresh grants to win the new election.
+    node = new_node(1, &reset_storage);
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    step_vote_response(node, 2, false);
+    apply_voter_change(node, RAFT_CONF_CHANGE_REMOVE_NODE, 2);
+    apply_voter_change(node, RAFT_CONF_CHANGE_ADD_NODE, 2);
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    assert_raft_state(node, RAFT_STATE_CANDIDATE);
+    step_vote_response(node, 3, false);
+    step_vote_response(node, 4, false);
+    assert_raft_state(node, RAFT_STATE_CANDIDATE);
+    step_vote_response(node, 5, false);
+    assert_raft_state(node, RAFT_STATE_LEADER);
+    raft_raw_node_destroy(node);
+
+    // Failure to allocate independent vote state follows the core's terminal
+    // allocation-error propagation path without partially recording a vote.
+    node = new_node(1, &allocation_storage);
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    raft_alloc_fail_after(0);
+    assert(raft_raw_node_step(
+               node,
+               &(raft_message_view_t){
+                   .type = RAFT_MSG_VOTE_RESP,
+                   .to = 1,
+                   .from = 2,
+                   .term = node->raft.term,
+                   .context = {NULL, 0, true},
+               }) == RAFT_ERR_OUT_OF_MEMORY);
+    raft_alloc_fail_reset();
+    assert(raft_raw_node_error(node) == RAFT_ERR_OUT_OF_MEMORY);
+    assert(node->raft.tracker.votes_granted.len == 0);
+    assert(node->raft.tracker.votes_rejected.len == 0);
+    raft_raw_node_destroy(node);
+
+    // A known learner's response is retained but not counted until the
+    // current configuration promotes that peer to voter.
+    node = new_node(1, &learner_storage);
+    apply_voter_change(node, RAFT_CONF_CHANGE_ADD_LEARNER_NODE, 2);
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    step_vote_response(node, 2, false);
+    assert_raft_state(node, RAFT_STATE_CANDIDATE);
+    apply_voter_change(node, RAFT_CONF_CHANGE_ADD_NODE, 2);
+    step_vote_response(node, 3, false);
+    assert_raft_state(node, RAFT_STATE_CANDIDATE);
+    step_vote_response(node, 4, false);
+    assert_raft_state(node, RAFT_STATE_LEADER);
+    raft_raw_node_destroy(node);
+}
+
+static void assert_fully_reset_progress(
+    const raft_progress_internal_t *progress,
+    uint64_t id,
+    uint64_t match,
+    uint64_t next) {
+    assert(progress != NULL);
+    assert(progress->id == id);
+    assert(progress->match_index == match);
+    assert(progress->next_index == next);
+    assert(progress->sent_commit == 0);
+    assert(progress->state == RAFT_PROGRESS_STATE_PROBE);
+    assert(progress->pending_snapshot == 0);
+    assert(!progress->recent_active);
+    assert(!progress->message_flow_paused);
+    assert(!progress->is_learner);
+    assert(progress->inflights.start == 0);
+    assert(progress->inflights.count == 0);
+    assert(progress->inflights.bytes == 0);
+    assert(progress->inflights.size == 16);
+    assert(progress->inflights.max_bytes == UINT64_MAX);
+    assert(progress->inflights.buffer == NULL);
+    assert(progress->inflights.capacity == 0);
+}
+
+static void dirty_progress_for_full_reset(
+    raft_progress_internal_t *progress,
+    uint64_t match,
+    uint64_t next) {
+    assert(progress != NULL);
+    progress->match_index = match;
+    progress->next_index = next;
+    progress->sent_commit = next - 1;
+    progress->state = RAFT_PROGRESS_STATE_SNAPSHOT;
+    progress->pending_snapshot = next - 1;
+    progress->recent_active = true;
+    progress->message_flow_paused = true;
+    assert(raft_inflights_add(
+               &progress->inflights, next - 2, 1) == RAFT_OK);
+    assert(progress->inflights.buffer != NULL);
+}
+
+static void test_raft_progress_reset_semantics(void) {
+    const uint64_t voters[] = {1, 2};
+    test_storage_t storage = {
+        .hard_state = {.term = 1, .commit = 3},
+        .voters = voters,
+        .voter_count = 2,
+        .last_index = 3,
+        .last_term = 1,
+    };
+    raft_raw_node_t *node = new_node(1, &storage);
+    raft_progress_internal_t *self =
+        raft_tracker_find(&node->raft.tracker, 1);
+    raft_progress_internal_t *peer =
+        raft_tracker_find(&node->raft.tracker, 2);
+
+    // Construction runs the Raft-wide reset. Self keeps the local last index,
+    // while all activity, commit, snapshot, probe, and inflight state is fresh.
+    assert_fully_reset_progress(self, 1, 3, 4);
+    assert_fully_reset_progress(peer, 2, 0, 4);
+    assert(node->raft.pending_conf_index == 0);
+
+    dirty_progress_for_full_reset(self, 1, 8);
+    dirty_progress_for_full_reset(peer, 2, 7);
+    node->raft.pending_conf_index = 9;
+
+    // Campaign enters candidate state through core_reset.
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    assert_raft_state(node, RAFT_STATE_CANDIDATE);
+    assert_fully_reset_progress(self, 1, 3, 4);
+    assert_fully_reset_progress(peer, 2, 0, 4);
+    assert(node->raft.pending_conf_index == 0);
+
+    raft_raw_node_destroy(node);
+}
+
 static void test_initial_state_and_configuration(void) {
     const uint64_t voters[] = {1};
     test_storage_t storage = {
@@ -343,7 +561,8 @@ static void test_initial_state_and_configuration(void) {
     progress = NULL;
     assert(raft_raw_node_progress_snapshot(
                node, &progress, &progress_len) == RAFT_OK);
-    assert(progress[0].progress.match_index == 0);
+    assert(progress[0].progress.match_index == 1);
+    assert(!progress[0].progress.recent_active);
     raft_progress_snapshot_array_free(progress, progress_len);
     raft_raw_node_destroy(node);
 }
@@ -1732,6 +1951,8 @@ int main(void) {
     test_randomized_election_timeout_lifecycle();
     test_tick_starts_single_node_election();
     test_vote_grant_reject_and_higher_term_stepdown();
+    test_candidate_vote_ownership();
+    test_raft_progress_reset_semantics();
     test_append_heartbeat_and_follower_proposal();
     test_append_rejection_log_term_optimization();
     test_commit_only_ready_does_not_require_sync();

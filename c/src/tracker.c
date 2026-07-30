@@ -351,6 +351,41 @@ int raft_progress_init(raft_progress_internal_t *progress,
     return RAFT_OK;
 }
 
+int raft_progress_reset(raft_progress_internal_t *progress,
+                        uint64_t match,
+                        uint64_t next) {
+    uint64_t id;
+    uint64_t max_inflight_bytes;
+    size_t max_inflight_messages;
+    bool is_learner;
+    int result;
+
+    if (progress == NULL || !raft_is_valid_node_id(progress->id) ||
+        next == 0 || match >= next ||
+        progress->inflights.size == 0) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    id = progress->id;
+    is_learner = progress->is_learner;
+    max_inflight_messages = progress->inflights.size;
+    max_inflight_bytes = progress->inflights.max_bytes;
+
+    raft_inflights_free(&progress->inflights);
+    memset(progress, 0, sizeof(*progress));
+    result = raft_inflights_init(&progress->inflights,
+                                 max_inflight_messages,
+                                 max_inflight_bytes);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    progress->id = id;
+    progress->match_index = match;
+    progress->next_index = next;
+    progress->state = RAFT_PROGRESS_STATE_PROBE;
+    progress->is_learner = is_learner;
+    return RAFT_OK;
+}
+
 void raft_progress_free(raft_progress_internal_t *progress) {
     if (progress == NULL) {
         return;
@@ -559,6 +594,8 @@ void raft_tracker_free(raft_progress_tracker_t *tracker) {
         raft_progress_free(&tracker->progress[i]);
     }
     free(tracker->progress);
+    raft_uint64_vec_free(&tracker->votes_granted);
+    raft_uint64_vec_free(&tracker->votes_rejected);
     raft_conf_state_free(&tracker->config);
     memset(tracker, 0, sizeof(*tracker));
 }
@@ -590,6 +627,14 @@ int raft_tracker_clone(raft_progress_tracker_t *dst,
     if (result == RAFT_OK) {
         result = raft_id_vec_copy(&dst->config.learners_next,
                                   &src->config.learners_next);
+    }
+    if (result == RAFT_OK) {
+        result = raft_id_vec_copy(&dst->votes_granted,
+                                  &src->votes_granted);
+    }
+    if (result == RAFT_OK) {
+        result = raft_id_vec_copy(&dst->votes_rejected,
+                                  &src->votes_rejected);
     }
     if (result != RAFT_OK) {
         raft_tracker_free(dst);
@@ -765,24 +810,26 @@ void raft_tracker_remove_progress(raft_progress_tracker_t *tracker,
 }
 
 void raft_tracker_reset_votes(raft_progress_tracker_t *tracker) {
-    size_t i;
     if (tracker == NULL) {
         return;
     }
-    for (i = 0; i < tracker->progress_len; ++i) {
-        tracker->progress[i].vote_recorded = false;
-        tracker->progress[i].vote_granted = false;
-    }
+    raft_uint64_vec_free(&tracker->votes_granted);
+    raft_uint64_vec_free(&tracker->votes_rejected);
 }
 
-void raft_tracker_record_vote(raft_progress_tracker_t *tracker,
-                              uint64_t id,
-                              bool granted) {
-    raft_progress_internal_t *progress = raft_tracker_find(tracker, id);
-    if (progress != NULL && !progress->vote_recorded) {
-        progress->vote_recorded = true;
-        progress->vote_granted = granted;
+int raft_tracker_record_vote(raft_progress_tracker_t *tracker,
+                             uint64_t id,
+                             bool granted) {
+    if (tracker == NULL || !raft_is_valid_node_id(id)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
     }
+    if (raft_id_vec_contains(&tracker->votes_granted, id) ||
+        raft_id_vec_contains(&tracker->votes_rejected, id)) {
+        return RAFT_OK;
+    }
+    return raft_id_vec_insert(
+        granted ? &tracker->votes_granted : &tracker->votes_rejected,
+        id);
 }
 
 static raft_vote_result_internal_t tracker_majority_vote_result(
@@ -797,12 +844,12 @@ static raft_vote_result_internal_t tracker_majority_vote_result(
         return RAFT_VOTE_WON;
     }
     for (i = 0; i < voters->len; ++i) {
-        const raft_progress_internal_t *progress =
-            raft_tracker_find_const(tracker, voters->items[i]);
-        if (progress == NULL || !progress->vote_recorded) {
-            ++missing;
-        } else if (progress->vote_granted) {
+        uint64_t id = voters->items[i];
+        if (raft_id_vec_contains(&tracker->votes_granted, id)) {
             ++yes;
+        } else if (!raft_id_vec_contains(
+                       &tracker->votes_rejected, id)) {
+            ++missing;
         }
     }
     quorum = voters->len / 2 + 1;

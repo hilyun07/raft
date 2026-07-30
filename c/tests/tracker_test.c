@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "tracker.h"
+#include "alloc.h"
 
 #include <assert.h>
 
@@ -63,20 +64,83 @@ static void test_majority_and_joint_quorums(void) {
     assert(raft_tracker_committed(&tracker) == 7);
 
     raft_tracker_reset_votes(&tracker);
-    raft_tracker_record_vote(&tracker, 1, true);
-    raft_tracker_record_vote(&tracker, 2, true);
+    assert(raft_tracker_record_vote(&tracker, 1, true) == RAFT_OK);
+    assert(raft_tracker_record_vote(&tracker, 2, true) == RAFT_OK);
     assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_PENDING);
-    raft_tracker_record_vote(&tracker, 3, true);
-    raft_tracker_record_vote(&tracker, 4, true);
+    assert(raft_tracker_record_vote(&tracker, 3, true) == RAFT_OK);
+    assert(raft_tracker_record_vote(&tracker, 4, true) == RAFT_OK);
     assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_WON);
 
     raft_tracker_reset_votes(&tracker);
-    raft_tracker_record_vote(&tracker, 1, true);
-    raft_tracker_record_vote(&tracker, 2, true);
-    raft_tracker_record_vote(&tracker, 3, false);
-    raft_tracker_record_vote(&tracker, 4, false);
-    raft_tracker_record_vote(&tracker, 5, false);
+    assert(raft_tracker_record_vote(&tracker, 1, true) == RAFT_OK);
+    assert(raft_tracker_record_vote(&tracker, 2, true) == RAFT_OK);
+    assert(raft_tracker_record_vote(&tracker, 3, false) == RAFT_OK);
+    assert(raft_tracker_record_vote(&tracker, 4, false) == RAFT_OK);
+    assert(raft_tracker_record_vote(&tracker, 5, false) == RAFT_OK);
     assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_LOST);
+    raft_tracker_free(&tracker);
+}
+
+static void replace_voter_progress(raft_progress_tracker_t *tracker,
+                                   uint64_t id) {
+    raft_id_vec_remove(&tracker->config.voters, id);
+    raft_tracker_remove_progress(tracker, id);
+    add_voter(tracker, id, 0);
+}
+
+static void test_vote_bookkeeping_lifetime(void) {
+    raft_progress_tracker_t tracker;
+
+    assert(raft_tracker_init(&tracker, 8, 0) == RAFT_OK);
+    add_voter(&tracker, 1, 0);
+    add_voter(&tracker, 2, 0);
+    add_voter(&tracker, 3, 0);
+
+    // A granted vote survives removal and replacement of its Progress.
+    assert(raft_tracker_record_vote(&tracker, 2, true) == RAFT_OK);
+    replace_voter_progress(&tracker, 2);
+    assert(raft_tracker_record_vote(&tracker, 1, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_WON);
+
+    // A rejected vote has the same independent lifetime.
+    raft_tracker_reset_votes(&tracker);
+    assert(raft_tracker_record_vote(&tracker, 2, false) == RAFT_OK);
+    replace_voter_progress(&tracker, 2);
+    assert(raft_tracker_record_vote(&tracker, 1, false) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_LOST);
+
+    // A new election reset clears retained votes.
+    raft_tracker_reset_votes(&tracker);
+    assert(raft_tracker_record_vote(&tracker, 2, true) == RAFT_OK);
+    replace_voter_progress(&tracker, 2);
+    raft_tracker_reset_votes(&tracker);
+    assert(tracker.votes_granted.len == 0);
+    assert(tracker.votes_rejected.len == 0);
+    assert(raft_tracker_record_vote(&tracker, 1, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_PENDING);
+    assert(raft_tracker_record_vote(&tracker, 3, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_WON);
+
+    // Retained history is not counted when the peer remains outside the
+    // current voter configuration.
+    raft_tracker_reset_votes(&tracker);
+    assert(raft_tracker_record_vote(&tracker, 2, true) == RAFT_OK);
+    raft_id_vec_remove(&tracker.config.voters, 2);
+    raft_tracker_remove_progress(&tracker, 2);
+    assert(raft_tracker_record_vote(&tracker, 1, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_PENDING);
+    assert(raft_tracker_record_vote(&tracker, 3, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_WON);
+
+    // Recording a vote is transactional when its separate set cannot grow.
+    raft_tracker_reset_votes(&tracker);
+    raft_alloc_fail_after(0);
+    assert(raft_tracker_record_vote(&tracker, 1, true) ==
+           RAFT_ERR_OUT_OF_MEMORY);
+    raft_alloc_fail_reset();
+    assert(tracker.votes_granted.len == 0);
+    assert(tracker.votes_rejected.len == 0);
+
     raft_tracker_free(&tracker);
 }
 
@@ -114,6 +178,44 @@ static void test_progress_and_inflights(void) {
     assert(raft_progress_maybe_decr_to(&progress, 7, 3));
     assert(progress.next_index == 8);
     assert(!raft_progress_is_paused(&progress));
+
+    raft_progress_free(&progress);
+}
+
+static void test_full_progress_reset(void) {
+    raft_progress_internal_t progress;
+
+    assert(raft_progress_init(&progress, 2, 5, true, 2, 100) == RAFT_OK);
+    progress.match_index = 4;
+    progress.next_index = 10;
+    progress.sent_commit = 8;
+    progress.state = RAFT_PROGRESS_STATE_SNAPSHOT;
+    progress.pending_snapshot = 9;
+    progress.recent_active = true;
+    progress.message_flow_paused = true;
+    assert(raft_inflights_add(&progress.inflights, 6, 40) == RAFT_OK);
+    assert(raft_inflights_add(&progress.inflights, 7, 60) == RAFT_OK);
+    assert(progress.inflights.buffer != NULL);
+    assert(progress.inflights.capacity == 2);
+
+    assert(raft_progress_reset(&progress, 10, 11) == RAFT_OK);
+
+    assert(progress.id == 2);
+    assert(progress.match_index == 10);
+    assert(progress.next_index == 11);
+    assert(progress.sent_commit == 0);
+    assert(progress.state == RAFT_PROGRESS_STATE_PROBE);
+    assert(progress.pending_snapshot == 0);
+    assert(!progress.recent_active);
+    assert(!progress.message_flow_paused);
+    assert(progress.is_learner);
+    assert(progress.inflights.start == 0);
+    assert(progress.inflights.count == 0);
+    assert(progress.inflights.bytes == 0);
+    assert(progress.inflights.size == 2);
+    assert(progress.inflights.max_bytes == 100);
+    assert(progress.inflights.buffer == NULL);
+    assert(progress.inflights.capacity == 0);
 
     raft_progress_free(&progress);
 }
@@ -161,7 +263,9 @@ static void test_become_probe_resets_optimistic_state(void) {
 
 int main(void) {
     test_majority_and_joint_quorums();
+    test_vote_bookkeeping_lifetime();
     test_progress_and_inflights();
+    test_full_progress_reset();
     test_become_probe_resets_optimistic_state();
     return 0;
 }

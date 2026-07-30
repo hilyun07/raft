@@ -211,6 +211,9 @@ func (rn *RawNode) beginCOperation() {
 }
 
 func (rn *RawNode) cOperationError(code C.int) error {
+	// rn owns the C RawNode through a finalizer. Keep that owner reachable
+	// until the native operation that produced code has returned.
+	runtime.KeepAlive(rn)
 	if rn == nil {
 		return decodeCError(code)
 	}
@@ -221,10 +224,13 @@ func (rn *RawNode) returnOrPanic(operation string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, errCCallbackPanic) ||
-		errors.Is(err, errCOutOfMemory) ||
-		(rn != nil && rn.p != nil &&
-			C.raft_raw_node_error(rn.p) != C.RAFT_OK) {
+	fatal := errors.Is(err, errCCallbackPanic) ||
+		errors.Is(err, errCOutOfMemory)
+	if !fatal && rn != nil && rn.p != nil {
+		fatal = C.raft_raw_node_error(rn.p) != C.RAFT_OK
+		runtime.KeepAlive(rn)
+	}
+	if fatal {
 		rn.panicOnError(operation, err)
 	}
 	return err
@@ -238,7 +244,9 @@ func (rn *RawNode) HasProgress(id uint64) bool {
 	if rn.ensureOpen() != nil {
 		return false
 	}
-	return bool(C.raft_raw_node_has_progress(rn.p, C.uint64_t(id)))
+	hasProgress := bool(C.raft_raw_node_has_progress(rn.p, C.uint64_t(id)))
+	runtime.KeepAlive(rn)
+	return hasProgress
 }
 
 func (rn *RawNode) AsyncStorageWritesEnabled() bool {
@@ -260,11 +268,14 @@ func (rn *RawNode) Tick() {
 
 func (rn *RawNode) TickQuiesced() {
 	rn.panicOnError("TickQuiesced", rn.ensureOpen())
+	rc := C.raft_raw_node_error(rn.p)
+	runtime.KeepAlive(rn)
 	rn.panicOnError(
 		"TickQuiesced",
-		decodeCError(C.raft_raw_node_error(rn.p)),
+		decodeCError(rc),
 	)
 	C.raft_raw_node_tick_quiesced(rn.p)
+	runtime.KeepAlive(rn)
 }
 
 func (rn *RawNode) Campaign() error {
@@ -439,7 +450,9 @@ func (rn *RawNode) HasReady() bool {
 	if rn.ensureOpen() != nil {
 		return false
 	}
-	return bool(C.raft_raw_node_has_ready(rn.p))
+	hasReady := bool(C.raft_raw_node_has_ready(rn.p))
+	runtime.KeepAlive(rn)
+	return hasReady
 }
 
 func (rn *RawNode) Advance(_ Ready) {

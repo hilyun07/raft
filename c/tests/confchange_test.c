@@ -137,6 +137,83 @@ static void test_joint_demotion_preserves_progress(void) {
     raft_tracker_free(&tracker);
 }
 
+static void test_configuration_changes_preserve_vote_history(void) {
+    raft_conf_change_single_t remove = {
+        .type = RAFT_CONF_CHANGE_REMOVE_NODE,
+        .node_id = 2,
+    };
+    raft_conf_change_single_t add = {
+        .type = RAFT_CONF_CHANGE_ADD_NODE,
+        .node_id = 2,
+    };
+    raft_progress_tracker_t tracker;
+
+    // A grant survives the transactional remove/add Progress replacement.
+    restore_three(&tracker);
+    assert(raft_tracker_record_vote(&tracker, 2, true) == RAFT_OK);
+    assert(apply_changes(&tracker,
+                         RAFT_CONF_CHANGE_TRANSITION_AUTO,
+                         &remove,
+                         1) == RAFT_OK);
+    assert(raft_tracker_find(&tracker, 2) == NULL);
+    assert(apply_changes(&tracker,
+                         RAFT_CONF_CHANGE_TRANSITION_AUTO,
+                         &add,
+                         1) == RAFT_OK);
+    assert(raft_tracker_find(&tracker, 2) != NULL);
+    assert(raft_tracker_record_vote(&tracker, 1, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_WON);
+    raft_tracker_free(&tracker);
+
+    // A rejection survives the same replacement.
+    restore_three(&tracker);
+    assert(raft_tracker_record_vote(&tracker, 2, false) == RAFT_OK);
+    assert(apply_changes(&tracker,
+                         RAFT_CONF_CHANGE_TRANSITION_AUTO,
+                         &remove,
+                         1) == RAFT_OK);
+    assert(apply_changes(&tracker,
+                         RAFT_CONF_CHANGE_TRANSITION_AUTO,
+                         &add,
+                         1) == RAFT_OK);
+    assert(raft_tracker_record_vote(&tracker, 1, false) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_LOST);
+    raft_tracker_free(&tracker);
+
+    // Reset starts a new vote round even after a retained vote was cloned
+    // through both configuration changes.
+    restore_three(&tracker);
+    assert(raft_tracker_record_vote(&tracker, 2, true) == RAFT_OK);
+    assert(apply_changes(&tracker,
+                         RAFT_CONF_CHANGE_TRANSITION_AUTO,
+                         &remove,
+                         1) == RAFT_OK);
+    assert(apply_changes(&tracker,
+                         RAFT_CONF_CHANGE_TRANSITION_AUTO,
+                         &add,
+                         1) == RAFT_OK);
+    raft_tracker_reset_votes(&tracker);
+    assert(raft_tracker_record_vote(&tracker, 1, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_PENDING);
+    assert(raft_tracker_record_vote(&tracker, 3, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_WON);
+    raft_tracker_free(&tracker);
+
+    // A retained vote from a peer that stays removed is history only and is
+    // not counted by the current two-voter configuration.
+    restore_three(&tracker);
+    assert(raft_tracker_record_vote(&tracker, 2, true) == RAFT_OK);
+    assert(apply_changes(&tracker,
+                         RAFT_CONF_CHANGE_TRANSITION_AUTO,
+                         &remove,
+                         1) == RAFT_OK);
+    assert(raft_tracker_record_vote(&tracker, 1, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_PENDING);
+    assert(raft_tracker_record_vote(&tracker, 3, true) == RAFT_OK);
+    assert(raft_tracker_vote_result(&tracker) == RAFT_VOTE_WON);
+    raft_tracker_free(&tracker);
+}
+
 static void test_protobuf_round_trip(void) {
     const uint8_t context[] = {4, 5};
     raft_conf_change_view_t v1 = {
@@ -191,6 +268,7 @@ static void test_protobuf_round_trip(void) {
 int main(void) {
     test_simple_and_transactional_changes();
     test_joint_demotion_preserves_progress();
+    test_configuration_changes_preserve_vote_history();
     test_protobuf_round_trip();
     return 0;
 }
