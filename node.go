@@ -451,6 +451,11 @@ func (n *node) run() {
 		case c := <-n.status:
 			c <- n.rn.Status()
 		case <-n.stop:
+			// Stop owns the Node's deterministic RawNode teardown. Destroy it
+			// before publishing done so no post-stop operation or application
+			// storage response can race native cleanup.
+			n.rn.destroy()
+			n.rn = nil
 			close(n.done)
 			return
 		}

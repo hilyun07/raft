@@ -43,6 +43,10 @@ type RawNode struct {
 	stepsOnAdvance []*pb.Message
 }
 
+// destroy is the shared Node ownership hook. The native Go RawNode owns only
+// garbage-collected Go memory, so deterministic Node teardown has no work.
+func (rn *RawNode) destroy() {}
+
 // NewRawNode instantiates a RawNode from the given configuration.
 //
 // See Bootstrap() for bootstrapping an initial state; this replaces the former
