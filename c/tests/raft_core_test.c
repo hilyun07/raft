@@ -664,6 +664,13 @@ static void test_election_replication_and_step_layering(void) {
         .term = 2,
         .context = {NULL, 0, true},
     };
+    raft_message_view_t known_response = {
+        .type = RAFT_MSG_HEARTBEAT_RESP,
+        .from = 2,
+        .to = 1,
+        .term = 2,
+        .context = {NULL, 0, true},
+    };
     raft_byte_view_t proposal = {
         .data = (const uint8_t *)"x",
         .len = 1,
@@ -735,6 +742,9 @@ static void test_election_replication_and_step_layering(void) {
     assert(raft_raw_node_step(nodes[0], &unknown_response) ==
            RAFT_ERR_STEP_PEER_NOT_FOUND_OR_IGNORED);
     assert(raft_raw_node_step_for_node(nodes[0], &unknown_response) ==
+           RAFT_ERR_STEP_PEER_NOT_FOUND_OR_IGNORED);
+    assert(raft_raw_node_step(nodes[0], &known_response) == RAFT_OK);
+    assert(raft_raw_node_step_for_node(nodes[0], &known_response) ==
            RAFT_OK);
 
     raft_ready_destroy(ready1);

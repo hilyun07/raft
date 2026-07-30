@@ -1268,15 +1268,6 @@ int raft_raw_node_step(raft_raw_node_t *raw_node,
         !raft_is_local_target_id(message->from)) {
         return RAFT_ERR_STEP_LOCAL_MSG;
     }
-    // Message IDs require message-aware validation. RAFT_NONE is valid for
-    // documented local-origin paths, and RAFT_LOCAL_* is valid for matching
-    // asynchronous-storage messages. Do not apply a blanket member-ID check.
-    //
-    if (message_type_is_response(message->type) &&
-        !raft_is_local_target_id(message->from) &&
-        !raft_core_has_progress(&raw_node->raft, message->from)) {
-        return RAFT_ERR_STEP_PEER_NOT_FOUND_OR_IGNORED;
-    }
     return raft_raw_node_step_for_node(raw_node, message);
 }
 
@@ -1286,7 +1277,15 @@ int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     // This is the lower-level Node actor/core entry point. It intentionally
-    // does not call raft_raw_node_step or apply public RawNode.Step checks.
+    // bypasses public local-message rejection, but retains RawNode's
+    // unknown-peer response filtering. Message IDs require message-aware
+    // validation: RAFT_NONE is valid for documented local-origin paths, and
+    // RAFT_LOCAL_* is valid for matching asynchronous-storage responses.
+    if (message_type_is_response(message->type) &&
+        !raft_is_local_target_id(message->from) &&
+        !raft_core_has_progress(&raw_node->raft, message->from)) {
+        return RAFT_ERR_STEP_PEER_NOT_FOUND_OR_IGNORED;
+    }
     return raft_core_step(&raw_node->raft, message);
 }
 

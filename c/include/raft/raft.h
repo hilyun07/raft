@@ -586,10 +586,10 @@ int raft_raw_node_apply_conf_change(
 int raft_raw_node_step(raft_raw_node_t *raw_node,
                        const raft_message_view_t *message);
 // Lower-level Go Node actor/core boundary corresponding to node.run's
-// package-internal r.Step calls. It intentionally bypasses public
-// RawNode.Step validation and must never delegate back to raft_raw_node_step.
-// The C-backed node.run path uses this function for messages already routed
-// and filtered by the Go Node layer.
+// package-internal r.Step calls. It bypasses public local-message rejection so
+// Node-generated local messages remain valid, but retains RawNode's response
+// filtering for unknown non-local peers. It must never delegate back to
+// raft_raw_node_step.
 int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
                                 const raft_message_view_t *message);
 
