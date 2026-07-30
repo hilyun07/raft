@@ -1899,6 +1899,12 @@ int raft_raw_node_status(const raft_raw_node_t *raw_node,
         raft_status_free(status);
         return result;
     }
+    /*
+     * Go Status projects tracker.Config through Config.Clone. The v3.7.0
+     * clone defines the public snapshot shape here; it does not copy
+     * AutoLeave even though the live tracker and ConfState do.
+     */
+    status->conf_state.auto_leave = false;
     if (raw_node->raft.state == RAFT_STATE_LEADER) {
         result = raft_core_status_progress_snapshot(
             &raw_node->raft,

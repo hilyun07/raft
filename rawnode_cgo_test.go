@@ -761,7 +761,7 @@ func TestCGoRawNodeRestoresJointConfState(t *testing.T) {
 	_, out3 := status.Config.Voters[1][3]
 	if len(status.Config.Voters[0]) != 2 || !in1 || !in2 ||
 		len(status.Config.Voters[1]) != 2 || !out1 || !out3 ||
-		!status.Config.AutoLeave {
+		status.Config.AutoLeave {
 		t.Fatalf("restored config = %+v", status.Config)
 	}
 	for _, id := range []uint64{1, 2, 3, 4} {

@@ -643,6 +643,11 @@ func idSet(ids []uint64) map[uint64]struct{} {
 
 func cTrackerConfig(src *C.raft_conf_state_t) tracker.Config {
 	voters := idSet(cUint64Vec(src.voters))
+	if voters == nil {
+		// tracker.MakeProgressTracker initializes the incoming voter set to a
+		// non-nil empty map, and Config.Clone preserves that shape in Status.
+		voters = make(map[uint64]struct{})
+	}
 	outgoing := idSet(cUint64Vec(src.voters_outgoing))
 	return tracker.Config{
 		Voters: quorum.JointConfig{

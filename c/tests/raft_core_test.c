@@ -24,28 +24,63 @@ typedef struct test_storage {
     raft_hard_state_t hard_state;
     const uint64_t *voters;
     size_t voter_count;
+    const uint64_t *voters_outgoing;
+    size_t voter_outgoing_count;
+    const uint64_t *learners;
+    size_t learner_count;
+    const uint64_t *learners_next;
+    size_t learner_next_count;
+    bool auto_leave;
     uint64_t last_index;
     uint64_t last_term;
 } test_storage_t;
+
+static int copy_test_ids(raft_uint64_vec_t *out,
+                         const uint64_t *ids,
+                         size_t count) {
+    if (count == 0) {
+        return RAFT_OK;
+    }
+    out->items = calloc(count, sizeof(*out->items));
+    if (out->items == NULL) {
+        return RAFT_ERR_OUT_OF_MEMORY;
+    }
+    memcpy(out->items, ids, count * sizeof(*out->items));
+    out->len = count;
+    return RAFT_OK;
+}
 
 static int test_initial_state(uintptr_t handle,
                               raft_hard_state_t *hard_state,
                               raft_conf_state_t *conf_state) {
     const test_storage_t *storage =
         (const test_storage_t *)(uintptr_t)handle;
+    int result;
+
     memset(conf_state, 0, sizeof(*conf_state));
     *hard_state = storage->hard_state;
-    if (storage->voter_count != 0) {
-        conf_state->voters.items =
-            calloc(storage->voter_count, sizeof(uint64_t));
-        if (conf_state->voters.items == NULL) {
-            return RAFT_ERR_OUT_OF_MEMORY;
-        }
-        memcpy(conf_state->voters.items,
-               storage->voters,
-               storage->voter_count * sizeof(uint64_t));
-        conf_state->voters.len = storage->voter_count;
+    result = copy_test_ids(
+        &conf_state->voters, storage->voters, storage->voter_count);
+    if (result == RAFT_OK) {
+        result = copy_test_ids(&conf_state->voters_outgoing,
+                               storage->voters_outgoing,
+                               storage->voter_outgoing_count);
     }
+    if (result == RAFT_OK) {
+        result = copy_test_ids(&conf_state->learners,
+                               storage->learners,
+                               storage->learner_count);
+    }
+    if (result == RAFT_OK) {
+        result = copy_test_ids(&conf_state->learners_next,
+                               storage->learners_next,
+                               storage->learner_next_count);
+    }
+    if (result != RAFT_OK) {
+        raft_conf_state_free(conf_state);
+        return result;
+    }
+    conf_state->auto_leave = storage->auto_leave;
     return RAFT_OK;
 }
 
@@ -2266,6 +2301,383 @@ static void test_empty_entry_proposal_semantics(void) {
     }
 }
 
+static void assert_status_ids(const raft_uint64_vec_t *actual,
+                              const uint64_t *expected,
+                              size_t expected_len) {
+    assert(actual->len == expected_len);
+    if (expected_len != 0) {
+        assert(actual->items != NULL);
+        assert(memcmp(actual->items,
+                      expected,
+                      expected_len * sizeof(*expected)) == 0);
+    }
+}
+
+static void assert_status_config(
+    raft_raw_node_t *node,
+    const uint64_t *voters,
+    size_t voter_count,
+    const uint64_t *voters_outgoing,
+    size_t voter_outgoing_count,
+    const uint64_t *learners,
+    size_t learner_count,
+    const uint64_t *learners_next,
+    size_t learner_next_count) {
+    raft_status_t status = {0};
+
+    assert(raft_raw_node_status(node, &status) == RAFT_OK);
+    assert_status_ids(&status.conf_state.voters,
+                      voters,
+                      voter_count);
+    assert_status_ids(&status.conf_state.voters_outgoing,
+                      voters_outgoing,
+                      voter_outgoing_count);
+    assert_status_ids(&status.conf_state.learners,
+                      learners,
+                      learner_count);
+    assert_status_ids(&status.conf_state.learners_next,
+                      learners_next,
+                      learner_next_count);
+    assert(!status.conf_state.auto_leave);
+    raft_status_free(&status);
+}
+
+static raft_conf_state_t apply_status_config_change(
+    raft_raw_node_t *node,
+    raft_conf_change_transition_t transition,
+    const raft_conf_change_single_t *changes,
+    size_t change_count) {
+    const raft_conf_change_v2_view_t change = {
+        .transition = transition,
+        .changes = changes,
+        .changes_len = change_count,
+        .context = {NULL, 0, true},
+    };
+    raft_conf_state_t state = {0};
+
+    assert(raft_raw_node_apply_conf_change(
+               node, &change, &state) == RAFT_OK);
+    return state;
+}
+
+static void test_status_config_autoleave_semantics(void) {
+    const uint64_t one[] = {1};
+    const uint64_t one_two[] = {1, 2};
+    const uint64_t one_three[] = {1, 3};
+    const uint64_t two[] = {2};
+    const uint64_t three[] = {3};
+    const uint64_t three_four[] = {3, 4};
+    const uint64_t four[] = {4};
+
+    // The initial empty and ordinary configurations report false AutoLeave.
+    {
+        test_storage_t empty_storage = {0};
+        test_storage_t normal_storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = one_two,
+            .voter_count = 2,
+            .learners = three,
+            .learner_count = 1,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_raw_node_t *empty = new_node(1, &empty_storage);
+        raft_raw_node_t *normal = new_node(1, &normal_storage);
+
+        assert_status_config(
+            empty, NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+        assert_status_config(normal,
+                             one_two,
+                             2,
+                             NULL,
+                             0,
+                             three,
+                             1,
+                             NULL,
+                             0);
+        raft_raw_node_destroy(normal);
+        raft_raw_node_destroy(empty);
+    }
+
+    // Restore and restart retain the live tracker's AutoLeave, while Status
+    // follows Go Config.Clone and omits it.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 2, .commit = 5},
+            .voters = one_two,
+            .voter_count = 2,
+            .voters_outgoing = one_three,
+            .voter_outgoing_count = 2,
+            .learners = four,
+            .learner_count = 1,
+            .learners_next = three,
+            .learner_next_count = 1,
+            .auto_leave = true,
+            .last_index = 5,
+            .last_term = 2,
+        };
+        raft_raw_node_t *node = new_node(1, &storage);
+        raft_status_t before = {0};
+        raft_conf_state_t left;
+
+        assert(node->raft.tracker.config.auto_leave);
+        assert_status_config(node,
+                             one_two,
+                             2,
+                             one_three,
+                             2,
+                             four,
+                             1,
+                             three,
+                             1);
+        assert(raft_raw_node_status(node, &before) == RAFT_OK);
+        left = apply_status_config_change(
+            node, RAFT_CONF_CHANGE_TRANSITION_AUTO, NULL, 0);
+        assert(!left.auto_leave);
+        assert(left.voters_outgoing.len == 0);
+        assert_status_config(
+            node, one_two, 2, NULL, 0, three_four, 2, NULL, 0);
+
+        // The earlier status remains a point-in-time owned copy.
+        assert_status_ids(&before.conf_state.voters_outgoing,
+                          one_three,
+                          2);
+        assert_status_ids(&before.conf_state.learners_next, three, 1);
+        assert(!before.conf_state.auto_leave);
+        raft_conf_state_free(&left);
+        raft_status_free(&before);
+        raft_raw_node_destroy(node);
+
+        node = new_node(1, &storage);
+        assert(node->raft.tracker.config.auto_leave);
+        assert_status_config(node,
+                             one_two,
+                             2,
+                             one_three,
+                             2,
+                             four,
+                             1,
+                             three,
+                             1);
+        raft_raw_node_destroy(node);
+    }
+
+    // Explicit joint consensus stores false, while implicit joint consensus
+    // stores true internally. Status reports false in both cases.
+    {
+        test_storage_t explicit_storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = one,
+            .voter_count = 1,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_raw_node_t *node = new_node(1, &explicit_storage);
+        const raft_conf_change_single_t add_learner = {
+            .type = RAFT_CONF_CHANGE_ADD_LEARNER_NODE,
+            .node_id = 2,
+        };
+        raft_conf_state_t state = apply_status_config_change(
+            node,
+            RAFT_CONF_CHANGE_TRANSITION_JOINT_EXPLICIT,
+            &add_learner,
+            1);
+
+        assert(!state.auto_leave);
+        assert(!node->raft.tracker.config.auto_leave);
+        assert_status_config(
+            node, one, 1, one, 1, two, 1, NULL, 0);
+        raft_conf_state_free(&state);
+        raft_raw_node_destroy(node);
+    }
+
+    // AutoLeave survives term and leadership changes in the live tracker.
+    // Once applied progress permits it, the leader proposes the empty V2
+    // leave entry. Applying that entry clears both joint state and AutoLeave.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = one,
+            .voter_count = 1,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_raw_node_t *node;
+        const raft_conf_change_single_t add_learner = {
+            .type = RAFT_CONF_CHANGE_ADD_LEARNER_NODE,
+            .node_id = 2,
+        };
+        raft_conf_state_t state;
+        raft_message_view_t higher_term = {
+            .type = RAFT_MSG_HEARTBEAT_RESP,
+            .to = 1,
+            .from = 1,
+            .context = {NULL, 0, true},
+        };
+        raft_ready_t *ready = NULL;
+        bool found_leave = false;
+        size_t i;
+
+        node = new_node(1, &storage);
+        state = apply_status_config_change(
+            node,
+            RAFT_CONF_CHANGE_TRANSITION_JOINT_IMPLICIT,
+            &add_learner,
+            1);
+        assert(state.auto_leave);
+        assert(node->raft.tracker.config.auto_leave);
+        assert_status_config(
+            node, one, 1, one, 1, two, 1, NULL, 0);
+        raft_conf_state_free(&state);
+
+        assert(raft_raw_node_campaign(node) == RAFT_OK);
+        accept_and_advance(node, &storage);
+        assert(node->raft.state == RAFT_STATE_LEADER);
+        higher_term.term = node->raft.term + 1;
+        assert(raft_raw_node_step(node, &higher_term) == RAFT_OK);
+        assert(node->raft.state == RAFT_STATE_FOLLOWER);
+        assert(node->raft.tracker.config.auto_leave);
+        assert_status_config(
+            node, one, 1, one, 1, two, 1, NULL, 0);
+
+        assert(raft_raw_node_campaign(node) == RAFT_OK);
+        accept_and_advance(node, &storage);
+        assert(node->raft.state == RAFT_STATE_LEADER);
+        assert(node->raft.tracker.config.auto_leave);
+        // The configuration was applied directly in this native unit test
+        // instead of through a committed log entry. Model that entry as
+        // applied before exercising the normal automatic-leave trigger.
+        node->raft.pending_conf_index = node->log.applied;
+        assert(raft_core_maybe_auto_leave(
+                   &node->raft, node->log.applied) == RAFT_OK);
+        assert(raft_raw_node_ready_without_accept(
+                   node, &ready) == RAFT_OK);
+        for (i = 0; i < ready->entries.len; ++i) {
+            if (ready->entries.items[i].type ==
+                    RAFT_ENTRY_CONF_CHANGE_V2 &&
+                ready->entries.items[i].data.len == 0) {
+                found_leave = true;
+            }
+        }
+        assert(found_leave);
+        raft_ready_destroy(ready);
+
+        state = apply_status_config_change(
+            node, RAFT_CONF_CHANGE_TRANSITION_AUTO, NULL, 0);
+        assert(!state.auto_leave);
+        assert(!node->raft.tracker.config.auto_leave);
+        assert_status_config(
+            node, one, 1, NULL, 0, two, 1, NULL, 0);
+        raft_conf_state_free(&state);
+        raft_raw_node_destroy(node);
+    }
+
+    // A live snapshot restore rebuilds AutoLeave from ConfState but does not
+    // expose it through Status.Config.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = one_two,
+            .voter_count = 2,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_raw_node_t *node = new_node(1, &storage);
+        const raft_message_view_t snapshot = {
+            .type = RAFT_MSG_SNAP,
+            .to = 1,
+            .from = 2,
+            .term = 3,
+            .has_snapshot = true,
+            .snapshot = {
+                .data = {NULL, 0, true},
+                .metadata = {
+                    .conf_state = {
+                        .voters = {one_two, 2},
+                        .voters_outgoing = {one_three, 2},
+                        .learners = {four, 1},
+                        .learners_next = {three, 1},
+                        .auto_leave = true,
+                    },
+                    .index = 5,
+                    .term = 2,
+                },
+            },
+            .context = {NULL, 0, true},
+        };
+
+        assert(raft_raw_node_step(node, &snapshot) == RAFT_OK);
+        assert(node->raft.tracker.config.auto_leave);
+        assert_status_config(node,
+                             one_two,
+                             2,
+                             one_three,
+                             2,
+                             four,
+                             1,
+                             three,
+                             1);
+        raft_raw_node_destroy(node);
+    }
+
+    // Learner promotion/removal updates only the relevant membership maps,
+    // and an earlier Status remains independent.
+    {
+        test_storage_t storage = {
+            .hard_state = {.term = 1, .commit = 1},
+            .voters = one,
+            .voter_count = 1,
+            .last_index = 1,
+            .last_term = 1,
+        };
+        raft_raw_node_t *node = new_node(1, &storage);
+        const raft_conf_change_single_t add_learner = {
+            .type = RAFT_CONF_CHANGE_ADD_LEARNER_NODE,
+            .node_id = 2,
+        };
+        const raft_conf_change_single_t promote = {
+            .type = RAFT_CONF_CHANGE_ADD_NODE,
+            .node_id = 2,
+        };
+        const raft_conf_change_single_t remove = {
+            .type = RAFT_CONF_CHANGE_REMOVE_NODE,
+            .node_id = 2,
+        };
+        raft_conf_state_t state;
+        raft_status_t learner_status = {0};
+
+        state = apply_status_config_change(
+            node,
+            RAFT_CONF_CHANGE_TRANSITION_AUTO,
+            &add_learner,
+            1);
+        raft_conf_state_free(&state);
+        assert_status_config(
+            node, one, 1, NULL, 0, two, 1, NULL, 0);
+        assert(raft_raw_node_status(node, &learner_status) == RAFT_OK);
+
+        state = apply_status_config_change(
+            node, RAFT_CONF_CHANGE_TRANSITION_AUTO, &promote, 1);
+        raft_conf_state_free(&state);
+        assert_status_config(
+            node, one_two, 2, NULL, 0, NULL, 0, NULL, 0);
+
+        state = apply_status_config_change(
+            node, RAFT_CONF_CHANGE_TRANSITION_AUTO, &remove, 1);
+        raft_conf_state_free(&state);
+        assert(!raft_raw_node_has_progress(node, 2));
+        assert_status_config(
+            node, one, 1, NULL, 0, NULL, 0, NULL, 0);
+
+        assert_status_ids(&learner_status.conf_state.voters, one, 1);
+        assert_status_ids(
+            &learner_status.conf_state.learners, two, 1);
+        assert(!learner_status.conf_state.auto_leave);
+        raft_status_free(&learner_status);
+        raft_raw_node_destroy(node);
+    }
+}
+
 static void test_uncommitted_proposal_limit(void) {
     const uint64_t voters[] = {1};
     test_storage_t storage = {
@@ -2700,6 +3112,7 @@ int main(void) {
     test_lease_read_and_check_quorum();
     test_empty_message_proposal_semantics();
     test_empty_entry_proposal_semantics();
+    test_status_config_autoleave_semantics();
     test_uncommitted_proposal_limit();
     test_status_progress_inflights();
     test_report_unreachable_paths();
