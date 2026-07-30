@@ -202,6 +202,38 @@ static raft_progress_t progress_for(raft_raw_node_t *node, uint64_t id) {
     return progress;
 }
 
+static void assert_progress_unchanged(
+    const raft_progress_internal_t *before,
+    const raft_progress_internal_t *after,
+    bool response_marks_active) {
+    assert(before != NULL);
+    assert(after != NULL);
+    assert(after->id == before->id);
+    assert(after->match_index == before->match_index);
+    assert(after->next_index == before->next_index);
+    assert(after->sent_commit == before->sent_commit);
+    assert(after->state == before->state);
+    assert(after->pending_snapshot == before->pending_snapshot);
+    assert(after->recent_active ==
+           (response_marks_active ? true : before->recent_active));
+    assert(after->message_flow_paused ==
+           before->message_flow_paused);
+    assert(after->is_learner == before->is_learner);
+    assert(after->inflights.start == before->inflights.start);
+    assert(after->inflights.count == before->inflights.count);
+    assert(after->inflights.bytes == before->inflights.bytes);
+    assert(after->inflights.size == before->inflights.size);
+    assert(after->inflights.max_bytes == before->inflights.max_bytes);
+    assert(after->inflights.capacity == before->inflights.capacity);
+    if (before->inflights.capacity != 0) {
+        assert(memcmp(
+                   after->inflights.buffer,
+                   before->inflights.buffer,
+                   before->inflights.capacity *
+                       sizeof(*before->inflights.buffer)) == 0);
+    }
+}
+
 static const raft_status_progress_t *status_progress_for(
     const raft_status_t *status, uint64_t id) {
     size_t i;
@@ -986,6 +1018,260 @@ static void test_append_rejection_log_term_optimization(void) {
         raft_ready_destroy(ready);
         raft_raw_node_destroy(node);
     }
+}
+
+static void test_stale_append_response_semantics(void) {
+    const uint64_t voters[] = {1, 2, 3};
+    const uint8_t proposal_bytes[] = {3, 4, 5};
+    test_storage_t storage = {
+        .hard_state = {.term = 1, .commit = 1},
+        .voters = voters,
+        .voter_count = 3,
+        .last_index = 1,
+        .last_term = 1,
+    };
+    raft_config_t cfg = config(1);
+    raft_raw_node_t *node;
+    raft_progress_internal_t *progress;
+    raft_progress_internal_t before;
+    raft_message_view_t response = {
+        .type = RAFT_MSG_APP_RESP,
+        .to = 1,
+        .from = 2,
+        .term = 2,
+        .context = {NULL, 0, true},
+    };
+    raft_byte_view_t proposal = {
+        .data = &proposal_bytes[0],
+        .len = 1,
+        .is_nil = false,
+    };
+    size_t i;
+
+    cfg.applied = 1;
+    node = new_node_with_config(cfg, &storage);
+    elect_three_node_leader(node, &storage, 2);
+    accept_and_advance(node, &storage);
+
+    response.index = 2;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    progress = raft_tracker_find(&node->raft.tracker, 2);
+    assert(progress != NULL);
+    assert(progress->state == RAFT_PROGRESS_STATE_REPLICATE);
+    assert(progress->match_index == 2);
+
+    assert(raft_raw_node_propose(node, &proposal) == RAFT_OK);
+    raft_core_clear_messages(&node->raft);
+    raft_core_clear_messages_after_append(&node->raft);
+    assert(progress->next_index == 4);
+    assert(progress->inflights.count == 1);
+    assert(raft_raw_node_report_unreachable(node, 2) == RAFT_OK);
+    assert(progress->state == RAFT_PROGRESS_STATE_PROBE);
+    assert(progress->match_index == 2);
+    assert(progress->next_index == 3);
+    assert(!progress->message_flow_paused);
+    assert(progress->inflights.count == 0);
+    assert(node->raft.messages.len == 0);
+    assert(node->raft.messages_after_append.len == 0);
+
+    // A successful response below Match is stale. It marks the peer active,
+    // but it must not send the pending entry or pause the probe.
+    progress->recent_active = false;
+    memset(&before, 0, sizeof(before));
+    assert(raft_progress_clone(&before, progress) == RAFT_OK);
+    response.index = 1;
+    response.reject = false;
+    response.reject_hint = 0;
+    response.log_term = 0;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    assert_progress_unchanged(&before, progress, true);
+    assert(node->raft.messages.len == 0);
+    assert(node->raft.messages_after_append.len == 0);
+    raft_progress_free(&before);
+
+    // Probe rejections are actionable only for Next-1. Both old-format and
+    // LogTerm-bearing stale rejections leave all Progress state unchanged.
+    for (i = 0; i < 2; ++i) {
+        progress->recent_active = false;
+        memset(&before, 0, sizeof(before));
+        assert(raft_progress_clone(&before, progress) == RAFT_OK);
+        response.index = 1;
+        response.reject = true;
+        response.reject_hint = 1;
+        response.log_term = i == 0 ? 0 : 1;
+        assert(raft_raw_node_step(node, &response) == RAFT_OK);
+        assert_progress_unchanged(&before, progress, true);
+        assert(node->raft.messages.len == 0);
+        assert(node->raft.messages_after_append.len == 0);
+        raft_progress_free(&before);
+    }
+
+    // A current zero-LogTerm rejection remains meaningful even if the chosen
+    // Next does not numerically change: it sends the outstanding probe.
+    response.index = 2;
+    response.reject = true;
+    response.reject_hint = 1;
+    response.log_term = 0;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    assert(progress->state == RAFT_PROGRESS_STATE_PROBE);
+    assert(progress->match_index == 2);
+    assert(progress->next_index == 3);
+    assert(progress->message_flow_paused);
+    assert(node->raft.messages.len != 0 ||
+           node->raft.messages_after_append.len != 0);
+    assert(raft_raw_node_has_ready(node));
+    raft_core_clear_messages(&node->raft);
+    raft_core_clear_messages_after_append(&node->raft);
+
+    // An equal-index success in probe state is deliberately actionable. It
+    // recovers replication and sends the pending entry.
+    response.index = 2;
+    response.reject = false;
+    response.reject_hint = 0;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    assert(progress->state == RAFT_PROGRESS_STATE_REPLICATE);
+    assert(progress->match_index == 2);
+    assert(progress->next_index == 4);
+    assert(progress->inflights.count == 1);
+    assert(raft_raw_node_has_ready(node));
+    accept_and_advance(node, &storage);
+
+    response.index = 3;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    assert(progress->match_index == 3);
+    assert(progress->next_index == 4);
+    assert(progress->inflights.count == 0);
+    accept_and_advance(node, &storage);
+
+    // A duplicate success in replicate state does not free a later inflight.
+    for (i = 1; i < sizeof(proposal_bytes); ++i) {
+        proposal.data = &proposal_bytes[i];
+        assert(raft_raw_node_propose(node, &proposal) == RAFT_OK);
+        accept_and_advance(node, &storage);
+    }
+    assert(progress->match_index == 3);
+    assert(progress->next_index == 6);
+    assert(progress->inflights.count == 2);
+    response.index = 4;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    assert(progress->match_index == 4);
+    assert(progress->next_index == 6);
+    assert(progress->inflights.count == 1);
+
+    progress->recent_active = false;
+    memset(&before, 0, sizeof(before));
+    assert(raft_progress_clone(&before, progress) == RAFT_OK);
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    assert_progress_unchanged(&before, progress, true);
+    assert(progress->inflights.count == 1);
+    assert(!raft_raw_node_has_ready(node));
+    raft_progress_free(&before);
+
+    // A newer response can arrive first and free all covered inflights. The
+    // delayed older response remains inert.
+    response.index = 5;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    assert(progress->match_index == 5);
+    assert(progress->next_index == 6);
+    assert(progress->inflights.count == 0);
+
+    progress->recent_active = false;
+    memset(&before, 0, sizeof(before));
+    assert(raft_progress_clone(&before, progress) == RAFT_OK);
+    response.index = 4;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    assert_progress_unchanged(&before, progress, true);
+    assert(!raft_raw_node_has_ready(node));
+    raft_progress_free(&before);
+
+    // Stale replicate-state rejections do not roll Next back or reset
+    // inflights, with or without the Phase 17 LogTerm optimization.
+    for (i = 0; i < 2; ++i) {
+        progress->recent_active = false;
+        memset(&before, 0, sizeof(before));
+        assert(raft_progress_clone(&before, progress) == RAFT_OK);
+        response.index = i == 0 ? 5 : 4;
+        response.reject = true;
+        response.reject_hint = 1;
+        response.log_term = i == 0 ? 0 : 1;
+        assert(raft_raw_node_step(node, &response) == RAFT_OK);
+        assert_progress_unchanged(&before, progress, true);
+        assert(!raft_raw_node_has_ready(node));
+        raft_progress_free(&before);
+    }
+
+    // A rejection beyond Match remains actionable. LogTerm still takes the
+    // Phase 17 conflict-search path before MaybeDecrTo applies its state guard.
+    response.index = 6;
+    response.reject = true;
+    response.reject_hint = 1;
+    response.log_term = 1;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    assert(progress->state == RAFT_PROGRESS_STATE_PROBE);
+    assert(progress->match_index == 5);
+    assert(progress->next_index == 6);
+    assert(progress->pending_snapshot == 0);
+    assert(!progress->message_flow_paused);
+    assert(progress->inflights.count == 0);
+    assert(raft_raw_node_has_ready(node));
+    accept_and_advance(node, &storage);
+
+    // Snapshot state has the same stale-success guard; PendingSnapshot and
+    // every other Progress field remain unchanged.
+    raft_progress_become_snapshot(progress, 10);
+    progress->recent_active = false;
+    memset(&before, 0, sizeof(before));
+    assert(raft_progress_clone(&before, progress) == RAFT_OK);
+    response.index = 4;
+    response.reject = false;
+    response.reject_hint = 0;
+    response.log_term = 0;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    assert_progress_unchanged(&before, progress, true);
+    assert(!raft_raw_node_has_ready(node));
+    raft_progress_free(&before);
+
+    // A real higher-term transition resets Progress. A response carrying the
+    // old term is discarded before leader response handling after re-election.
+    assert(raft_raw_node_step(
+               node,
+               &(raft_message_view_t){
+                   .type = RAFT_MSG_HEARTBEAT,
+                   .to = 1,
+                   .from = 3,
+                   .term = 3,
+                   .commit = 5,
+                   .context = {NULL, 0, true},
+               }) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    assert(raft_raw_node_step(
+               node,
+               &(raft_message_view_t){
+                   .type = RAFT_MSG_VOTE_RESP,
+                   .to = 1,
+                   .from = 2,
+                   .term = 4,
+                   .context = {NULL, 0, true},
+               }) == RAFT_OK);
+    accept_and_advance(node, &storage);
+    progress = raft_tracker_find(&node->raft.tracker, 2);
+    assert(progress != NULL);
+    assert(progress->state == RAFT_PROGRESS_STATE_PROBE);
+    memset(&before, 0, sizeof(before));
+    assert(raft_progress_clone(&before, progress) == RAFT_OK);
+    response.term = 2;
+    response.index = 5;
+    assert(raft_raw_node_step(node, &response) == RAFT_OK);
+    assert_progress_unchanged(&before, progress, false);
+    assert(!raft_raw_node_has_ready(node));
+    raft_progress_free(&before);
+
+    raft_raw_node_destroy(node);
 }
 
 static void test_commit_only_ready_does_not_require_sync(void) {
@@ -2024,6 +2310,7 @@ int main(void) {
     test_append_heartbeat_and_follower_proposal();
     test_heartbeat_commit_invariant();
     test_append_rejection_log_term_optimization();
+    test_stale_append_response_semantics();
     test_commit_only_ready_does_not_require_sync();
     test_election_replication_and_step_layering();
     test_unsupported_configuration_is_explicit();

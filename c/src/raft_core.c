@@ -1963,6 +1963,9 @@ static int core_handle_append_response(
                 &progress->inflights, message->index);
         }
     }
+    if (!updated) {
+        return RAFT_OK;
+    }
     result = core_maybe_commit(raft, &committed);
     if (result != RAFT_OK) {
         return result;
