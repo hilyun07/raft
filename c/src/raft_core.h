@@ -55,7 +55,7 @@ typedef struct raft {
     raft_message_vec_t pending_read_index_messages;
     raft_read_state_vec_t read_states;
 
-    // Sticky fatal/callback/storage failure produced by a void Tick call.
+    // Sticky terminal storage, callback, or allocation failure.
     int error;
 } raft_t;
 
@@ -64,6 +64,8 @@ int raft_core_init(raft_t *raft,
                    raft_log_t *log,
                    const raft_storage_ops_t *storage);
 void raft_core_free(raft_t *raft);
+bool raft_result_is_terminal(int result);
+int raft_core_latch_error(raft_t *raft, int result);
 
 int raft_core_bootstrap(raft_t *raft,
                         const raft_peer_view_t *peers,

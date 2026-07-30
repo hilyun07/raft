@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define RAFT_ALLOC_REPLACE_STDLIB
+#include "alloc.h"
+
 static uint64_t read_only_get_le64(const uint8_t *data) {
     uint64_t value = 0;
     size_t i;

@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define RAFT_ALLOC_REPLACE_STDLIB
+#include "alloc.h"
+
 static uint64_t tracker_min_u64(uint64_t left, uint64_t right) {
     return left < right ? left : right;
 }
@@ -884,26 +887,33 @@ uint64_t raft_tracker_committed(const raft_progress_tracker_t *tracker) {
     return tracker_min_u64(incoming, outgoing);
 }
 
-bool raft_tracker_quorum_active(const raft_progress_tracker_t *tracker) {
-    raft_progress_tracker_t copy;
+static bool tracker_majority_active(
+    const raft_progress_tracker_t *tracker,
+    const raft_uint64_vec_t *voters) {
+    size_t active = 0;
     size_t i;
-    bool active;
 
-    if (tracker == NULL ||
-        raft_tracker_clone(&copy, tracker) != RAFT_OK) {
-        return false;
+    if (voters->len == 0) {
+        return true;
     }
-    raft_tracker_reset_votes(&copy);
-    for (i = 0; i < copy.progress_len; ++i) {
-        if (raft_tracker_is_voter(&copy, copy.progress[i].id)) {
-            raft_tracker_record_vote(&copy,
-                                     copy.progress[i].id,
-                                     copy.progress[i].recent_active);
+    for (i = 0; i < voters->len; ++i) {
+        const raft_progress_internal_t *progress =
+            raft_tracker_find_const(tracker, voters->items[i]);
+        if (progress != NULL && progress->recent_active) {
+            ++active;
         }
     }
-    active = raft_tracker_vote_result(&copy) == RAFT_VOTE_WON;
-    raft_tracker_free(&copy);
-    return active;
+    return active >= voters->len / 2 + 1;
+}
+
+bool raft_tracker_quorum_active(const raft_progress_tracker_t *tracker) {
+    if (tracker == NULL) {
+        return false;
+    }
+    return tracker_majority_active(
+               tracker, &tracker->config.voters) &&
+           tracker_majority_active(
+               tracker, &tracker->config.voters_outgoing);
 }
 
 int raft_tracker_conf_state_copy(const raft_progress_tracker_t *tracker,

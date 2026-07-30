@@ -20,6 +20,7 @@ package raft
 #cgo CFLAGS: -I${SRCDIR}/c/include -I${SRCDIR}/c/src
 #include <stdlib.h>
 #include "raft/raft.h"
+#include "alloc.h"
 */
 import "C"
 
@@ -49,7 +50,7 @@ func (a *cInputArena) alloc(count, size uintptr) (unsafe.Pointer, error) {
 	if size == 0 || count > ^uintptr(0)/size {
 		return nil, errCOutOfMemory
 	}
-	p := C.calloc(C.size_t(count), C.size_t(size))
+	p := C.raft_calloc(C.size_t(count), C.size_t(size))
 	if p == nil {
 		return nil, errCOutOfMemory
 	}

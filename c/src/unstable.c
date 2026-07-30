@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define RAFT_ALLOC_REPLACE_STDLIB
+#include "alloc.h"
+
 static int unstable_entry_copy(raft_entry_t *dst, const raft_entry_t *src) {
     int result;
 

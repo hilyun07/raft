@@ -425,8 +425,17 @@ func TestCGoRawNodeSnapshotStorageErrorPropagates(t *testing.T) {
 	storage.snapshotErr = ErrUnavailable
 	rn := cgoElectSnapshotLeader(t, storage)
 	defer rn.destroy()
-	if err := cgoRejectCompactedAppend(t, rn); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("snapshot storage error = %v, want ErrUnavailable", err)
+	rn.logger = discardLogger
+
+	if recovered := cgoCapturePanic(func() {
+		_ = cgoRejectCompactedAppend(t, rn)
+	}); recovered == nil {
+		t.Fatal("unexpected snapshot storage error did not panic")
+	}
+	if recovered := cgoCapturePanic(func() {
+		_ = rn.Campaign()
+	}); recovered == nil {
+		t.Fatal("terminal snapshot storage error was not sticky")
 	}
 }
 

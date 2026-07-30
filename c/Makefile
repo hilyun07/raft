@@ -12,6 +12,7 @@ SANITIZER_CFLAGS ?= -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
 
 LIBRARY := $(BUILD_DIR)/libraft_c.a
 OBJECTS := \
+	$(BUILD_DIR)/alloc.o \
 	$(BUILD_DIR)/random.o \
 	$(BUILD_DIR)/unstable.o \
 	$(BUILD_DIR)/log.o \
@@ -28,7 +29,8 @@ TEST_BINARIES := \
 	$(BUILD_DIR)/tracker_test \
 	$(BUILD_DIR)/confchange_test \
 	$(BUILD_DIR)/unstable_test \
-	$(BUILD_DIR)/log_test
+	$(BUILD_DIR)/log_test \
+	$(BUILD_DIR)/fatal_error_test
 
 .PHONY: all
 all: $(LIBRARY)
@@ -36,35 +38,39 @@ all: $(LIBRARY)
 $(BUILD_DIR):
 	mkdir -p $@
 
+$(BUILD_DIR)/alloc.o: src/alloc.c src/alloc.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
+		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
+
 $(BUILD_DIR)/random.o: src/random.c src/random.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/unstable.o: src/unstable.c src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/unstable.o: src/unstable.c src/unstable.h src/alloc.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/log.o: src/log.c src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/log.o: src/log.c src/log.h src/unstable.h src/alloc.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/tracker.o: src/tracker.c src/tracker.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/tracker.o: src/tracker.c src/tracker.h src/alloc.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/confchange.o: src/confchange.c src/confchange.h src/tracker.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/confchange.o: src/confchange.c src/confchange.h src/tracker.h src/alloc.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/read_only.o: src/read_only.c src/read_only.h src/tracker.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/read_only.o: src/read_only.c src/read_only.h src/tracker.h src/alloc.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/raft_core.o: src/raft_core.c src/raft_core.h src/random.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/raft_core.o: src/raft_core.c src/raft_core.h src/random.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h src/alloc.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/raw_node.o: src/raw_node.c src/raft_internal.h src/raft_core.h src/random.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/raw_node.o: src/raw_node.c src/raft_internal.h src/raft_core.h src/random.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h src/alloc.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
@@ -103,6 +109,10 @@ $(BUILD_DIR)/log_test: tests/log_test.c src/log.h src/unstable.h include/raft/ra
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
 
+$(BUILD_DIR)/fatal_error_test: tests/fatal_error_test.c src/alloc.h include/raft/raft.h $(LIBRARY)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
+		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
+
 .PHONY: test
 test: $(TEST_BINARIES)
 	$(BUILD_DIR)/raw_node_skeleton_test
@@ -113,6 +123,7 @@ test: $(TEST_BINARIES)
 	$(BUILD_DIR)/confchange_test
 	$(BUILD_DIR)/unstable_test
 	$(BUILD_DIR)/log_test
+	$(BUILD_DIR)/fatal_error_test
 
 .PHONY: test-sanitize
 test-sanitize:

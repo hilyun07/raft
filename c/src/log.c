@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define RAFT_ALLOC_REPLACE_STDLIB
+#include "alloc.h"
+
 static uint64_t log_varint_size(uint64_t value) {
     uint64_t size = 1;
     while (value >= 0x80) {
@@ -240,10 +243,27 @@ int raft_log_last_term(raft_log_t *log, uint64_t *term) {
     return raft_log_term(log, index, term);
 }
 
-bool raft_log_match_term(raft_log_t *log, uint64_t index, uint64_t term) {
+int raft_log_match_term(raft_log_t *log,
+                        uint64_t index,
+                        uint64_t term,
+                        bool *matches) {
     uint64_t actual;
-    return raft_log_term(log, index, &actual) == RAFT_OK &&
-           actual == term;
+    int result;
+
+    if (matches == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    *matches = false;
+    result = raft_log_term(log, index, &actual);
+    if (result == RAFT_ERR_STORAGE_COMPACTED ||
+        result == RAFT_ERR_STORAGE_UNAVAILABLE) {
+        return RAFT_OK;
+    }
+    if (result != RAFT_OK) {
+        return result;
+    }
+    *matches = actual == term;
+    return RAFT_OK;
 }
 
 int raft_log_zero_term_on_out_of_bounds(int result,
@@ -353,12 +373,16 @@ int raft_log_slice(raft_log_t *log,
         log->storage.handle, lo, cut, max_size, out);
     if (result != RAFT_OK) {
         raft_entry_vec_free(out);
-        return result;
+        return result == RAFT_ERR_STORAGE_UNAVAILABLE
+                   ? RAFT_ERR_FATAL
+                   : result;
     }
     result = log_validate_owned_entries(out);
     if (result != RAFT_OK) {
         raft_entry_vec_free(out);
-        return result;
+        return result == RAFT_ERR_INVALID_ARGUMENT
+                   ? RAFT_ERR_FATAL
+                   : result;
     }
     if (out->len == 0 || (uint64_t)out->len > cut - lo ||
         out->items[0].index != lo) {
@@ -486,13 +510,21 @@ int raft_log_find_conflict(raft_log_t *log,
     }
     *conflict_index = 0;
     for (i = 0; i < entry_count; ++i) {
+        bool matches;
+        int result;
+
         if (!raft_entry_valid(&entries[i]) ||
             (i != 0 &&
              (entries[i - 1].index == UINT64_MAX ||
               entries[i].index != entries[i - 1].index + 1))) {
             return RAFT_ERR_INVALID_ARGUMENT;
         }
-        if (!raft_log_match_term(log, entries[i].index, entries[i].term)) {
+        result = raft_log_match_term(
+            log, entries[i].index, entries[i].term, &matches);
+        if (result != RAFT_OK) {
+            return result;
+        }
+        if (!matches) {
             *conflict_index = entries[i].index;
             return RAFT_OK;
         }
@@ -517,10 +549,14 @@ int raft_log_find_conflict_by_term(raft_log_t *log,
             return RAFT_OK;
         }
         result = raft_log_term(log, index, &our_term);
-        if (result != RAFT_OK) {
+        if (result == RAFT_ERR_STORAGE_COMPACTED ||
+            result == RAFT_ERR_STORAGE_UNAVAILABLE) {
             *conflict_index = index;
             *conflict_term = 0;
             return RAFT_OK;
+        }
+        if (result != RAFT_OK) {
+            return result;
         }
         if (our_term <= term) {
             *conflict_index = index;
@@ -540,6 +576,7 @@ int raft_log_maybe_append(raft_log_t *log,
                           bool *appended,
                           uint64_t *last_new_index) {
     uint64_t conflict;
+    bool matches;
     int result;
 
     if (log == NULL || appended == NULL || last_new_index == NULL ||
@@ -549,7 +586,12 @@ int raft_log_maybe_append(raft_log_t *log,
     }
     *appended = false;
     *last_new_index = 0;
-    if (!raft_log_match_term(log, previous_index, previous_term)) {
+    result = raft_log_match_term(
+        log, previous_index, previous_term, &matches);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    if (!matches) {
         return RAFT_OK;
     }
     if (entry_count != 0 &&
@@ -615,13 +657,22 @@ int raft_log_maybe_commit(raft_log_t *log,
                           uint64_t index,
                           uint64_t term,
                           bool *committed) {
+    bool matches;
+    int result;
+
     if (log == NULL || committed == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     *committed = false;
-    if (term != 0 && index > log->committed &&
-        raft_log_match_term(log, index, term)) {
-        int result = raft_log_commit_to(log, index);
+    if (term == 0 || index <= log->committed) {
+        return RAFT_OK;
+    }
+    result = raft_log_match_term(log, index, term, &matches);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    if (matches) {
+        result = raft_log_commit_to(log, index);
         if (result != RAFT_OK) {
             return result;
         }
@@ -803,16 +854,29 @@ int raft_log_restore(raft_log_t *log, const raft_snapshot_t *snapshot) {
     return result;
 }
 
-bool raft_log_is_up_to_date(raft_log_t *log,
-                            uint64_t candidate_index,
-                            uint64_t candidate_term) {
+int raft_log_is_up_to_date(raft_log_t *log,
+                           uint64_t candidate_index,
+                           uint64_t candidate_term,
+                           bool *up_to_date) {
     uint64_t last_index;
     uint64_t last_term;
-    if (raft_log_last_index(log, &last_index) != RAFT_OK ||
-        raft_log_term(log, last_index, &last_term) != RAFT_OK) {
-        return false;
+    int result;
+
+    if (up_to_date == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
     }
-    return candidate_term > last_term ||
-           (candidate_term == last_term &&
-            candidate_index >= last_index);
+    *up_to_date = false;
+    result = raft_log_last_index(log, &last_index);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    result = raft_log_term(log, last_index, &last_term);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    *up_to_date =
+        candidate_term > last_term ||
+        (candidate_term == last_term &&
+         candidate_index >= last_index);
+    return RAFT_OK;
 }

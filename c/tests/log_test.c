@@ -331,6 +331,7 @@ static void test_append_conflict_and_maybe_append(void) {
     uint64_t value;
     uint64_t conflict_term;
     bool appended;
+    bool up_to_date;
 
     storage_init(&storage, 0, 0, 1, NULL, 0);
     ops = storage_ops(&storage);
@@ -344,9 +345,15 @@ static void test_append_conflict_and_maybe_append(void) {
     assert(raft_log_find_conflict_by_term(
                &log, 3, 2, &value, &conflict_term) == RAFT_OK);
     assert(value == 2 && conflict_term == 2);
-    assert(raft_log_is_up_to_date(&log, 3, 3));
-    assert(!raft_log_is_up_to_date(&log, 2, 3));
-    assert(raft_log_is_up_to_date(&log, 1, 4));
+    assert(raft_log_is_up_to_date(
+               &log, 3, 3, &up_to_date) == RAFT_OK);
+    assert(up_to_date);
+    assert(raft_log_is_up_to_date(
+               &log, 2, 3, &up_to_date) == RAFT_OK);
+    assert(!up_to_date);
+    assert(raft_log_is_up_to_date(
+               &log, 1, 4, &up_to_date) == RAFT_OK);
+    assert(up_to_date);
     assert(raft_log_zero_term_on_out_of_bounds(
                RAFT_ERR_STORAGE_UNAVAILABLE, 9, &value) == RAFT_OK);
     assert(value == 0);
@@ -492,11 +499,51 @@ static void test_restore_snapshot_and_errors(void) {
     storage_free(&storage);
 }
 
+static void test_storage_error_classification(void) {
+    const uint64_t terms[] = {1};
+    fake_storage_t storage;
+    raft_storage_ops_t ops;
+    raft_log_t log;
+    raft_entry_vec_t out = {0};
+    bool value;
+
+    storage_init(&storage, 0, 0, 1, terms, 1);
+    ops = storage_ops(&storage);
+    assert(raft_log_init(&log, &ops, UINT64_MAX) == RAFT_OK);
+
+    storage.term_error = RAFT_ERR_STORAGE_COMPACTED;
+    assert(raft_log_match_term(&log, 1, 1, &value) == RAFT_OK);
+    assert(!value);
+    storage.term_error = RAFT_ERR_STORAGE_UNAVAILABLE;
+    assert(raft_log_match_term(&log, 1, 1, &value) == RAFT_OK);
+    assert(!value);
+    storage.term_error = RAFT_ERR_FATAL;
+    assert(raft_log_match_term(&log, 1, 1, &value) == RAFT_ERR_FATAL);
+    assert(!value);
+    assert(raft_log_is_up_to_date(
+               &log, 1, 1, &value) == RAFT_ERR_FATAL);
+    assert(!value);
+
+    storage.term_error = RAFT_OK;
+    storage.entries_error = RAFT_ERR_STORAGE_UNAVAILABLE;
+    assert(raft_log_slice(&log, 1, 2, UINT64_MAX, &out) ==
+           RAFT_ERR_FATAL);
+    raft_entry_vec_free(&out);
+    storage.entries_error = RAFT_ERR_STORAGE_COMPACTED;
+    assert(raft_log_slice(&log, 1, 2, UINT64_MAX, &out) ==
+           RAFT_ERR_STORAGE_COMPACTED);
+    raft_entry_vec_free(&out);
+
+    raft_log_free(&log);
+    storage_free(&storage);
+}
+
 int main(void) {
     test_constructor_indexes_terms_and_snapshot();
     test_slice_across_storage_and_unstable();
     test_append_conflict_and_maybe_append();
     test_commit_apply_and_ready_progress();
     test_restore_snapshot_and_errors();
+    test_storage_error_classification();
     return 0;
 }

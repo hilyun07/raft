@@ -43,7 +43,10 @@ int raft_log_first_index(raft_log_t *log, uint64_t *index);
 int raft_log_last_index(raft_log_t *log, uint64_t *index);
 int raft_log_last_term(raft_log_t *log, uint64_t *term);
 int raft_log_term(raft_log_t *log, uint64_t index, uint64_t *term);
-bool raft_log_match_term(raft_log_t *log, uint64_t index, uint64_t term);
+int raft_log_match_term(raft_log_t *log,
+                        uint64_t index,
+                        uint64_t term,
+                        bool *matches);
 int raft_log_zero_term_on_out_of_bounds(int result,
                                         uint64_t term,
                                         uint64_t *out);
@@ -117,9 +120,10 @@ void raft_log_accept_unstable(raft_log_t *log);
 void raft_log_stable_to(raft_log_t *log, uint64_t index, uint64_t term);
 void raft_log_stable_snap_to(raft_log_t *log, uint64_t index);
 int raft_log_restore(raft_log_t *log, const raft_snapshot_t *snapshot);
-bool raft_log_is_up_to_date(raft_log_t *log,
-                            uint64_t candidate_index,
-                            uint64_t candidate_term);
+int raft_log_is_up_to_date(raft_log_t *log,
+                           uint64_t candidate_index,
+                           uint64_t candidate_term,
+                           bool *up_to_date);
 
 // Internal size helper. The current raft_entry_t lacks protobuf scalar
 // presence bits, so zero-valued scalar fields are treated as absent.

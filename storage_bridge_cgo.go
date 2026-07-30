@@ -20,6 +20,7 @@ package raft
 #cgo CFLAGS: -I${SRCDIR}/c/include -I${SRCDIR}/c/src
 #include <stdlib.h>
 #include "raft/raft.h"
+#include "alloc.h"
 
 int raft_go_storage_call_initial_state(uintptr_t handle,
                                        raft_hard_state_t *hard_state,
@@ -70,6 +71,20 @@ func (b *storageBridge) recordedError() error {
 	return b.lastErr
 }
 
+func (b *storageBridge) clearError() {
+	b.mu.Lock()
+	b.lastErr = nil
+	b.mu.Unlock()
+}
+
+func (b *storageBridge) takeError() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	err := b.lastErr
+	b.lastErr = nil
+	return err
+}
+
 func bridgeFromHandle(handle C.uintptr_t) *storageBridge {
 	return cgo.Handle(handle).Value().(*storageBridge)
 }
@@ -90,7 +105,7 @@ func copyBytesToC(dst *C.raft_bytes_t, src []byte) bool {
 	if len(src) == 0 {
 		return true
 	}
-	dst.data = (*C.uint8_t)(C.malloc(C.size_t(len(src))))
+	dst.data = (*C.uint8_t)(C.raft_malloc(C.size_t(len(src))))
 	if dst.data == nil {
 		*dst = C.raft_bytes_t{}
 		dst.is_nil = cBool(true)
@@ -110,7 +125,7 @@ func copyUint64sToC(dst *C.raft_uint64_vec_t, src []uint64) bool {
 		return false
 	}
 	size := uintptr(len(src)) * elementSize
-	dst.items = (*C.uint64_t)(C.malloc(C.size_t(size)))
+	dst.items = (*C.uint64_t)(C.raft_malloc(C.size_t(size)))
 	if dst.items == nil {
 		return false
 	}
@@ -200,7 +215,7 @@ func goRaftStorageInitialState(
 	if cs == nil {
 		err := fmt.Errorf("raft/cgo: Storage.InitialState returned nil ConfState")
 		bridge.recordError(err)
-		return C.RAFT_ERR_INVALID_ARGUMENT
+		return C.RAFT_ERR_FATAL
 	}
 	hardState.term = C.uint64_t(hs.GetTerm())
 	hardState.vote = C.uint64_t(hs.GetVote())
@@ -245,7 +260,7 @@ func goRaftStorageEntries(
 	if uintptr(len(entries)) > ^uintptr(0)/elementSize {
 		return C.RAFT_ERR_OUT_OF_MEMORY
 	}
-	out.items = (*C.raft_entry_t)(C.calloc(C.size_t(len(entries)), C.size_t(unsafe.Sizeof(C.raft_entry_t{}))))
+	out.items = (*C.raft_entry_t)(C.raft_calloc(C.size_t(len(entries)), C.size_t(unsafe.Sizeof(C.raft_entry_t{}))))
 	if out.items == nil {
 		return C.RAFT_ERR_OUT_OF_MEMORY
 	}
@@ -256,7 +271,7 @@ func goRaftStorageEntries(
 			C.raft_entry_vec_free(out)
 			err := fmt.Errorf("raft/cgo: Storage.Entries returned nil entry at offset %d", i)
 			bridge.recordError(err)
-			return C.RAFT_ERR_INVALID_ARGUMENT
+			return C.RAFT_ERR_FATAL
 		}
 		if !copyEntryToC(&rows[i], entry) {
 			C.raft_entry_vec_free(out)
@@ -362,7 +377,7 @@ func goRaftStorageSnapshot(
 	if snapshot == nil {
 		err := fmt.Errorf("raft/cgo: Storage.Snapshot returned nil Snapshot")
 		bridge.recordError(err)
-		return C.RAFT_ERR_INVALID_ARGUMENT
+		return C.RAFT_ERR_FATAL
 	}
 	if !copySnapshotToC(out, snapshot) {
 		return C.RAFT_ERR_OUT_OF_MEMORY
@@ -387,8 +402,8 @@ type storageInitialStateCallbackResult struct {
 
 func callStorageInitialState(handle cgo.Handle) storageInitialStateCallbackResult {
 	result := storageInitialStateCallbackResult{
-		hardState: (*C.raft_hard_state_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_hard_state_t{})))),
-		confState: (*C.raft_conf_state_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_conf_state_t{})))),
+		hardState: (*C.raft_hard_state_t)(C.raft_calloc(1, C.size_t(unsafe.Sizeof(C.raft_hard_state_t{})))),
+		confState: (*C.raft_conf_state_t)(C.raft_calloc(1, C.size_t(unsafe.Sizeof(C.raft_conf_state_t{})))),
 	}
 	if result.hardState == nil || result.confState == nil {
 		result.code = int(C.RAFT_ERR_OUT_OF_MEMORY)
@@ -426,7 +441,7 @@ func callStorageEntries(
 	handle cgo.Handle, lo, hi, maxSize uint64,
 ) storageEntriesCallbackResult {
 	result := storageEntriesCallbackResult{
-		entries: (*C.raft_entry_vec_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_entry_vec_t{})))),
+		entries: (*C.raft_entry_vec_t)(C.raft_calloc(1, C.size_t(unsafe.Sizeof(C.raft_entry_vec_t{})))),
 	}
 	if result.entries == nil {
 		result.code = int(C.RAFT_ERR_OUT_OF_MEMORY)
@@ -462,7 +477,7 @@ func callStorageScalar(
 	handle cgo.Handle,
 	call func(*C.uint64_t) C.int,
 ) (int, uint64) {
-	out := (*C.uint64_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.uint64_t(0)))))
+	out := (*C.uint64_t)(C.raft_calloc(1, C.size_t(unsafe.Sizeof(C.uint64_t(0)))))
 	if out == nil {
 		return int(C.RAFT_ERR_OUT_OF_MEMORY), 0
 	}
@@ -498,7 +513,7 @@ type storageSnapshotCallbackResult struct {
 
 func callStorageSnapshot(handle cgo.Handle) storageSnapshotCallbackResult {
 	result := storageSnapshotCallbackResult{
-		snapshot: (*C.raft_snapshot_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_snapshot_t{})))),
+		snapshot: (*C.raft_snapshot_t)(C.raft_calloc(1, C.size_t(unsafe.Sizeof(C.raft_snapshot_t{})))),
 	}
 	if result.snapshot == nil {
 		result.code = int(C.RAFT_ERR_OUT_OF_MEMORY)

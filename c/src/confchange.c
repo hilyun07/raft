@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define RAFT_ALLOC_REPLACE_STDLIB
+#include "alloc.h"
+
 typedef struct proto_writer {
     uint8_t *data;
     size_t len;

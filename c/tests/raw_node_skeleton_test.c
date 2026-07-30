@@ -216,12 +216,9 @@ static void test_lifecycle_and_minimal_core(void) {
     assert(status.progress_len == 0);
 
     // Membership calls are active in Phase 8. Without a leader, proposals
-    // are dropped, and leaving a non-joint empty configuration is invalid.
+    // are dropped.
     assert(raft_raw_node_propose_conf_change(raw_node, &conf_change) ==
            RAFT_ERR_PROPOSAL_DROPPED);
-    assert(raft_raw_node_apply_conf_change(raw_node, &conf_change,
-                                           &conf_state) ==
-           RAFT_ERR_FATAL);
     assert(raft_raw_node_read_index(
                raw_node, &(raft_byte_view_t){&byte, 1, 0}) ==
            RAFT_OK);
@@ -429,9 +426,6 @@ static void test_node_id_boundary_validation(void) {
             assert(raft_raw_node_propose_conf_change(
                        raw_node, &conf_change) ==
                    RAFT_ERR_PROPOSAL_DROPPED);
-            assert(raft_raw_node_apply_conf_change(
-                       raw_node, &conf_change, &conf_state) ==
-                   RAFT_ERR_FATAL);
         } else {
             assert(raft_raw_node_propose_conf_change(
                        raw_node, &conf_change) ==
@@ -458,6 +452,7 @@ static void test_node_id_boundary_validation(void) {
     assert(raft_raw_node_apply_conf_change(raw_node, &conf_change,
                                            &conf_state) ==
            RAFT_OK);
+    raft_conf_state_free(&conf_state);
 
     // Empty V2 changes can represent leaving joint configuration and have no
     // member ID to validate.
@@ -470,6 +465,15 @@ static void test_node_id_boundary_validation(void) {
     conf_change.changes_len = 1;
     assert(raft_raw_node_propose_conf_change(raw_node, &conf_change) ==
            RAFT_ERR_INVALID_ARGUMENT);
+
+    // Invalid configuration application is a panic in Go. The C API returns
+    // and latches its terminal result so bindings can surface the panic.
+    conf_change.changes = NULL;
+    conf_change.changes_len = 0;
+    assert(raft_raw_node_apply_conf_change(
+               raw_node, &conf_change, &conf_state) == RAFT_ERR_FATAL);
+    assert(raft_raw_node_error(raw_node) == RAFT_ERR_FATAL);
+    assert(raft_raw_node_campaign(raw_node) == RAFT_ERR_FATAL);
 
     raft_conf_state_free(&conf_state);
     raft_raw_node_destroy(raw_node);

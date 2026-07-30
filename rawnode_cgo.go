@@ -20,6 +20,7 @@ package raft
 #cgo CFLAGS: -I${SRCDIR}/c/include -I${SRCDIR}/c/src
 #include <stdlib.h>
 #include "raft/raft.h"
+#include "alloc.h"
 
 void raft_go_storage_ops_init(raft_storage_ops_t *ops, uintptr_t handle);
 */
@@ -45,6 +46,7 @@ type RawNode struct {
 	logger             Logger
 	asyncStorageWrites bool
 
+	storageBridge *storageBridge
 	storageHandle cgo.Handle
 	pendingReady  *C.raft_ready_t
 }
@@ -108,9 +110,13 @@ func newRawNode(
 		step_down_on_removal:           cBool(config.StepDownOnRemoval),
 	}
 	var rawNode *C.raft_raw_node_t
+	bridge.clearError()
 	rc := C.raft_raw_node_new(&cc, &ops, &rawNode)
-	if err := decodeCError(rc); err != nil {
+	if err := decodeCErrorWithStorage(rc, bridge); err != nil {
 		handle.Delete()
+		if isCConstructorFatal(err) {
+			panicWithLogger(config.Logger, "NewRawNode", err)
+		}
 		return nil, err
 	}
 	rn := &RawNode{
@@ -118,6 +124,7 @@ func newRawNode(
 		id:                 config.ID,
 		logger:             config.Logger,
 		asyncStorageWrites: config.AsyncStorageWrites,
+		storageBridge:      bridge,
 		storageHandle:      handle,
 	}
 	runtime.SetFinalizer(rn, (*RawNode).finalize)
@@ -160,13 +167,67 @@ func (rn *RawNode) ensureOpen() error {
 }
 
 func (rn *RawNode) panicOnError(operation string, err error) {
+	var logger Logger
+	if rn != nil {
+		logger = rn.logger
+	}
+	panicWithLogger(logger, operation, err)
+}
+
+func panicWithLogger(logger Logger, operation string, err error) {
 	if err == nil {
 		return
 	}
-	if rn != nil && rn.logger != nil {
-		rn.logger.Panicf("%s: %v", operation, err)
+	if logger != nil {
+		logger.Panicf("%s: %v", operation, err)
 	}
 	panic(fmt.Errorf("%s: %w", operation, err))
+}
+
+func isCConstructorFatal(err error) bool {
+	return errors.Is(err, ErrCompacted) ||
+		errors.Is(err, ErrUnavailable) ||
+		errors.Is(err, errCCallbackPanic) ||
+		errors.Is(err, errCOutOfMemory) ||
+		errors.Is(err, errCFatal)
+}
+
+func decodeCErrorWithStorage(code C.int, bridge *storageBridge) error {
+	err := decodeCError(code)
+	if bridge == nil {
+		return err
+	}
+	detail := bridge.takeError()
+	if err != nil && detail != nil && cErrorCanCarryStorageDetail(err) {
+		return fmt.Errorf("%w: %w", err, detail)
+	}
+	return err
+}
+
+func (rn *RawNode) beginCOperation() {
+	if rn != nil && rn.storageBridge != nil {
+		rn.storageBridge.clearError()
+	}
+}
+
+func (rn *RawNode) cOperationError(code C.int) error {
+	if rn == nil {
+		return decodeCError(code)
+	}
+	return decodeCErrorWithStorage(code, rn.storageBridge)
+}
+
+func (rn *RawNode) returnOrPanic(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errCCallbackPanic) ||
+		errors.Is(err, errCOutOfMemory) ||
+		(rn != nil && rn.p != nil &&
+			C.raft_raw_node_error(rn.p) != C.RAFT_OK) {
+		rn.panicOnError(operation, err)
+	}
+	return err
 }
 
 func (rn *RawNode) ID() uint64 {
@@ -190,11 +251,19 @@ func (rn *RawNode) Logger() Logger {
 
 func (rn *RawNode) Tick() {
 	rn.panicOnError("Tick", rn.ensureOpen())
-	C.raft_raw_node_tick(rn.p)
+	rn.beginCOperation()
+	rn.panicOnError(
+		"Tick",
+		rn.cOperationError(C.raft_raw_node_tick_result(rn.p)),
+	)
 }
 
 func (rn *RawNode) TickQuiesced() {
 	rn.panicOnError("TickQuiesced", rn.ensureOpen())
+	rn.panicOnError(
+		"TickQuiesced",
+		decodeCError(C.raft_raw_node_error(rn.p)),
+	)
 	C.raft_raw_node_tick_quiesced(rn.p)
 }
 
@@ -202,13 +271,18 @@ func (rn *RawNode) Campaign() error {
 	if err := rn.ensureOpen(); err != nil {
 		return err
 	}
-	return decodeCError(C.raft_raw_node_campaign(rn.p))
+	rn.beginCOperation()
+	return rn.returnOrPanic(
+		"Campaign",
+		rn.cOperationError(C.raft_raw_node_campaign(rn.p)),
+	)
 }
 
 func (rn *RawNode) Propose(data []byte) error {
 	if err := rn.ensureOpen(); err != nil {
 		return err
 	}
+	rn.beginCOperation()
 	rc := C.raft_raw_node_propose_from_parts(
 		rn.p,
 		borrowedBytes(data),
@@ -216,7 +290,7 @@ func (rn *RawNode) Propose(data []byte) error {
 		cBool(data == nil),
 	)
 	keepAlive(data)
-	return decodeCError(rc)
+	return rn.returnOrPanic("Propose", rn.cOperationError(rc))
 }
 
 func (rn *RawNode) ProposeConfChange(cc pb.ConfChangeI) error {
@@ -224,26 +298,32 @@ func (rn *RawNode) ProposeConfChange(cc pb.ConfChangeI) error {
 		return err
 	}
 	if cc == nil {
-		return decodeCError(C.raft_raw_node_propose_conf_change(rn.p, nil))
+		rn.beginCOperation()
+		return rn.returnOrPanic(
+			"ProposeConfChange",
+			rn.cOperationError(C.raft_raw_node_propose_conf_change(rn.p, nil)),
+		)
 	}
 	var arena cInputArena
 	defer arena.free()
 	if legacy, ok := cc.AsV1(); ok {
 		view, err := makeConfChangeV1View(&arena, legacy)
 		if err != nil {
-			return err
+			return rn.returnOrPanic("ProposeConfChange", err)
 		}
+		rn.beginCOperation()
 		rc := C.raft_raw_node_propose_conf_change_v1(rn.p, view)
 		keepAlive(cc)
-		return decodeCError(rc)
+		return rn.returnOrPanic("ProposeConfChange", rn.cOperationError(rc))
 	}
 	view, err := makeConfChangeV2View(&arena, cc)
 	if err != nil {
-		return err
+		return rn.returnOrPanic("ProposeConfChange", err)
 	}
+	rn.beginCOperation()
 	rc := C.raft_raw_node_propose_conf_change(rn.p, view)
 	keepAlive(cc)
-	return decodeCError(rc)
+	return rn.returnOrPanic("ProposeConfChange", rn.cOperationError(rc))
 }
 
 func (rn *RawNode) ApplyConfChange(cc pb.ConfChangeI) *pb.ConfState {
@@ -253,16 +333,17 @@ func (rn *RawNode) ApplyConfChange(cc pb.ConfChangeI) *pb.ConfState {
 	view, err := makeConfChangeV2View(&arena, cc)
 	rn.panicOnError("ApplyConfChange", err)
 
-	out := (*C.raft_conf_state_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_conf_state_t{}))))
+	out := (*C.raft_conf_state_t)(C.raft_calloc(1, C.size_t(unsafe.Sizeof(C.raft_conf_state_t{}))))
 	if out == nil {
 		rn.panicOnError("ApplyConfChange", errCOutOfMemory)
 	}
 	defer C.free(unsafe.Pointer(out))
 	defer C.raft_conf_state_free(out)
 
+	rn.beginCOperation()
 	rc := C.raft_raw_node_apply_conf_change(rn.p, view, out)
 	keepAlive(cc)
-	rn.panicOnError("ApplyConfChange", decodeCError(rc))
+	rn.panicOnError("ApplyConfChange", rn.cOperationError(rc))
 	return cConfState(out)
 }
 
@@ -291,8 +372,9 @@ func (rn *RawNode) step(message *pb.Message, forNode bool) error {
 	defer arena.free()
 	view, err := makeMessageView(&arena, message)
 	if err != nil {
-		return err
+		return rn.returnOrPanic("Step", err)
 	}
+	rn.beginCOperation()
 	var rc C.int
 	if forNode {
 		rc = C.raft_raw_node_step_for_node(rn.p, view)
@@ -300,7 +382,7 @@ func (rn *RawNode) step(message *pb.Message, forNode bool) error {
 		rc = C.raft_raw_node_step(rn.p, view)
 	}
 	keepAlive(message)
-	return decodeCError(rc)
+	return rn.returnOrPanic("Step", rn.cOperationError(rc))
 }
 
 func (rn *RawNode) Ready() Ready {
@@ -309,8 +391,9 @@ func (rn *RawNode) Ready() Ready {
 	// Match Go RawNode by allowing a later preview/Ready to replace it.
 	rn.discardPendingReady()
 	var ready *C.raft_ready_t
+	rn.beginCOperation()
 	rc := C.raft_raw_node_ready(rn.p, &ready)
-	if err := decodeCError(rc); err != nil {
+	if err := rn.cOperationError(rc); err != nil {
 		if ready != nil {
 			C.raft_ready_destroy(ready)
 		}
@@ -326,8 +409,9 @@ func (rn *RawNode) readyWithoutAccept() Ready {
 	// processing another event. The old C-owned preview was never accepted.
 	rn.discardPendingReady()
 	var ready *C.raft_ready_t
+	rn.beginCOperation()
 	rc := C.raft_raw_node_ready_without_accept(rn.p, &ready)
-	if err := decodeCError(rc); err != nil {
+	if err := rn.cOperationError(rc); err != nil {
 		if ready != nil {
 			C.raft_ready_destroy(ready)
 		}
@@ -345,9 +429,10 @@ func (rn *RawNode) acceptReady(_ Ready) {
 	}
 	ready := rn.pendingReady
 	rn.pendingReady = nil
+	rn.beginCOperation()
 	rc := C.raft_raw_node_accept_ready(rn.p, ready)
 	C.raft_ready_destroy(ready)
-	rn.panicOnError("acceptReady", decodeCError(rc))
+	rn.panicOnError("acceptReady", rn.cOperationError(rc))
 }
 
 func (rn *RawNode) HasReady() bool {
@@ -365,30 +450,36 @@ func (rn *RawNode) Advance(_ Ready) {
 			errors.New("Advance must not be called when using AsyncStorageWrites"),
 		)
 	}
-	rn.panicOnError("Advance", decodeCError(C.raft_raw_node_advance(rn.p)))
+	rn.beginCOperation()
+	rn.panicOnError(
+		"Advance",
+		rn.cOperationError(C.raft_raw_node_advance(rn.p)),
+	)
 }
 
 func (rn *RawNode) BasicStatus() BasicStatus {
 	rn.panicOnError("BasicStatus", rn.ensureOpen())
 	var status C.raft_basic_status_t
+	rn.beginCOperation()
 	rn.panicOnError(
 		"BasicStatus",
-		decodeCError(C.raft_raw_node_basic_status(rn.p, &status)),
+		rn.cOperationError(C.raft_raw_node_basic_status(rn.p, &status)),
 	)
 	return cBasicStatus(&status)
 }
 
 func (rn *RawNode) Status() Status {
 	rn.panicOnError("Status", rn.ensureOpen())
-	status := (*C.raft_status_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.raft_status_t{}))))
+	status := (*C.raft_status_t)(C.raft_calloc(1, C.size_t(unsafe.Sizeof(C.raft_status_t{}))))
 	if status == nil {
 		rn.panicOnError("Status", errCOutOfMemory)
 	}
 	defer C.free(unsafe.Pointer(status))
 	defer C.raft_status_free(status)
+	rn.beginCOperation()
 	rn.panicOnError(
 		"Status",
-		decodeCError(C.raft_raw_node_status(rn.p, status)),
+		rn.cOperationError(C.raft_raw_node_status(rn.p, status)),
 	)
 
 	out := Status{
@@ -418,8 +509,9 @@ func (rn *RawNode) WithProgress(
 	rn.panicOnError("WithProgress", rn.ensureOpen())
 	var rows *C.raft_progress_snapshot_t
 	var count C.size_t
+	rn.beginCOperation()
 	rc := C.raft_raw_node_progress_snapshot(rn.p, &rows, &count)
-	rn.panicOnError("WithProgress", decodeCError(rc))
+	rn.panicOnError("WithProgress", rn.cOperationError(rc))
 	defer C.raft_progress_snapshot_array_free(rows, count)
 
 	snapshots := unsafe.Slice(rows, checkedCLen(count))
@@ -434,17 +526,19 @@ func (rn *RawNode) WithProgress(
 
 func (rn *RawNode) ReportUnreachable(id uint64) {
 	rn.panicOnError("ReportUnreachable", rn.ensureOpen())
+	rn.beginCOperation()
 	rn.panicOnError(
 		"ReportUnreachable",
-		decodeCError(C.raft_raw_node_report_unreachable(rn.p, C.uint64_t(id))),
+		rn.cOperationError(C.raft_raw_node_report_unreachable(rn.p, C.uint64_t(id))),
 	)
 }
 
 func (rn *RawNode) ReportSnapshot(id uint64, status SnapshotStatus) {
 	rn.panicOnError("ReportSnapshot", rn.ensureOpen())
+	rn.beginCOperation()
 	rn.panicOnError(
 		"ReportSnapshot",
-		decodeCError(C.raft_raw_node_report_snapshot(
+		rn.cOperationError(C.raft_raw_node_report_snapshot(
 			rn.p,
 			C.uint64_t(id),
 			C.raft_snapshot_status_t(status),
@@ -454,9 +548,10 @@ func (rn *RawNode) ReportSnapshot(id uint64, status SnapshotStatus) {
 
 func (rn *RawNode) TransferLeader(transferee uint64) {
 	rn.panicOnError("TransferLeader", rn.ensureOpen())
+	rn.beginCOperation()
 	rn.panicOnError(
 		"TransferLeader",
-		decodeCError(C.raft_raw_node_transfer_leader(
+		rn.cOperationError(C.raft_raw_node_transfer_leader(
 			rn.p,
 			C.uint64_t(transferee),
 		)),
@@ -467,11 +562,16 @@ func (rn *RawNode) ForgetLeader() error {
 	if err := rn.ensureOpen(); err != nil {
 		return err
 	}
-	return decodeCError(C.raft_raw_node_forget_leader(rn.p))
+	rn.beginCOperation()
+	return rn.returnOrPanic(
+		"ForgetLeader",
+		rn.cOperationError(C.raft_raw_node_forget_leader(rn.p)),
+	)
 }
 
 func (rn *RawNode) ReadIndex(requestContext []byte) {
 	rn.panicOnError("ReadIndex", rn.ensureOpen())
+	rn.beginCOperation()
 	rc := C.raft_raw_node_read_index_from_parts(
 		rn.p,
 		borrowedBytes(requestContext),
@@ -479,7 +579,7 @@ func (rn *RawNode) ReadIndex(requestContext []byte) {
 		cBool(requestContext == nil),
 	)
 	keepAlive(requestContext)
-	rn.panicOnError("ReadIndex", decodeCError(rc))
+	rn.panicOnError("ReadIndex", rn.cOperationError(rc))
 }
 
 func (rn *RawNode) Bootstrap(peers []Peer) error {
@@ -493,16 +593,17 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 	defer arena.free()
 	p, err := arena.alloc(uintptr(len(peers)), unsafe.Sizeof(C.raft_peer_view_t{}))
 	if err != nil {
-		return err
+		return rn.returnOrPanic("Bootstrap", err)
 	}
 	rows := unsafe.Slice((*C.raft_peer_view_t)(p), len(peers))
 	for i := range peers {
 		rows[i].id = C.uint64_t(peers[i].ID)
 		arena.setByteView(&rows[i].context, peers[i].Context)
 	}
+	rn.beginCOperation()
 	rc := C.raft_raw_node_bootstrap(rn.p, (*C.raft_peer_view_t)(p), C.size_t(len(rows)))
 	keepAlive(peers)
-	return decodeCError(rc)
+	return rn.returnOrPanic("Bootstrap", rn.cOperationError(rc))
 }
 
 // MustSync preserves the public Go helper in the tagged build. Commit changes
@@ -511,4 +612,15 @@ func MustSync(st, prevst *pb.HardState, entsnum int) bool {
 	return entsnum != 0 ||
 		st.GetVote() != prevst.GetVote() ||
 		st.GetTerm() != prevst.GetTerm()
+}
+
+// These package-private hooks make C allocation failures deterministic in the
+// tagged backend tests. The injector fails one allocation and then disables
+// itself so error-path cleanup remains executable.
+func cgoFailAllocationAfter(successfulAllocations uint64) {
+	C.raft_alloc_fail_after(C.size_t(successfulAllocations))
+}
+
+func cgoResetAllocationFailure() {
+	C.raft_alloc_fail_reset()
 }

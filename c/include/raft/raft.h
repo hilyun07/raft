@@ -564,6 +564,14 @@ int raft_raw_node_new(const raft_config_t *config,
                       raft_raw_node_t **out);
 void raft_raw_node_destroy(raft_raw_node_t *raw_node);
 
+// Stateful operations return fatal storage, callback, and allocation failures
+// and latch the first such result. Subsequent stateful operations return the
+// same result. Go bindings surface these terminal results as panics, matching
+// the original implementation.
+//
+// Bootstrap is the exception before mutation starts: a LastIndex failure is
+// returned without being latched, as in the original Go Bootstrap method.
+
 // API layering for pointer-bearing input:
 // - Native C callers may create const *_view_t descriptors on the C stack.
 // - The Go binding uses *_from_parts for flat bytes.
@@ -574,11 +582,13 @@ void raft_raw_node_destroy(raft_raw_node_t *raw_node);
 //   backing arrays only during that call. C never retains a view pointer.
 // Field-by-field builder calls are intentionally not part of this ABI.
 
-// Fatal,
-// allocation, or callback errors reached through this void API become sticky
-// and are returned by the next error-returning RawNode operation.
+// Retained for native source compatibility. The supplemental result-returning
+// form is used by bindings that can surface terminal failures immediately.
 void raft_raw_node_tick(raft_raw_node_t *raw_node);
+int raft_raw_node_tick_result(raft_raw_node_t *raw_node);
 void raft_raw_node_tick_quiesced(raft_raw_node_t *raw_node);
+// Returns the sticky terminal failure, or RAFT_OK.
+int raft_raw_node_error(const raft_raw_node_t *raw_node);
 
 // Bootstrap, campaign, normal proposals, and configuration changes are
 // implemented by the C Raft core.

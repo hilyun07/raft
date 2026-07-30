@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define RAFT_ALLOC_REPLACE_STDLIB
+#include "alloc.h"
+
 // validity, option checker
 
 bool raft_is_none_id(uint64_t id) {
@@ -1182,20 +1185,28 @@ int raft_raw_node_new(const raft_config_t *config,
 // logger, hasprogress, id, asyncstoragewritesenabled dualized into c and go
 
 void raft_raw_node_tick(raft_raw_node_t *raw_node) {
-    int result;
-    if (raw_node == NULL || raw_node->raft.error != RAFT_OK) {
-        return;
+    (void)raft_raw_node_tick_result(raw_node);
+}
+
+int raft_raw_node_tick_result(raft_raw_node_t *raw_node) {
+    if (raw_node == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
     }
-    result = raft_core_tick(&raw_node->raft);
-    if (result != RAFT_OK) {
-        raw_node->raft.error = result;
+    if (raw_node->raft.error != RAFT_OK) {
+        return raw_node->raft.error;
     }
+    return raft_core_tick(&raw_node->raft);
 }
 
 void raft_raw_node_tick_quiesced(raft_raw_node_t *raw_node) {
     if (raw_node != NULL) {
         raft_core_tick_quiesced(&raw_node->raft);
     }
+}
+
+int raft_raw_node_error(const raft_raw_node_t *raw_node) {
+    return raw_node == NULL ? RAFT_ERR_INVALID_ARGUMENT
+                            : raw_node->raft.error;
 }
 
 int raft_raw_node_campaign(raft_raw_node_t *raw_node) {
@@ -1277,6 +1288,9 @@ int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
     if (raw_node == NULL || !raft_message_view_valid(message)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
+    if (raw_node->raft.error != RAFT_OK) {
+        return raw_node->raft.error;
+    }
     // This is the lower-level Node actor/core entry point. It intentionally
     // bypasses public local-message rejection, but retains RawNode's
     // unknown-peer response filtering. Message IDs require message-aware
@@ -1291,9 +1305,16 @@ int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
 }
 
 int raft_raw_node_ready(raft_raw_node_t *raw_node, raft_ready_t **ready) {
-    int result = raw_node_build_ready(raw_node, ready);
+    int result;
+
+    if (ready == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    result = raw_node_build_ready(raw_node, ready);
     if (result != RAFT_OK) {
-        return result;
+        return raw_node == NULL
+                   ? result
+                   : raft_core_latch_error(&raw_node->raft, result);
     }
     result = raft_raw_node_accept_ready(raw_node, *ready);
     if (result != RAFT_OK) {
@@ -1305,7 +1326,15 @@ int raft_raw_node_ready(raft_raw_node_t *raw_node, raft_ready_t **ready) {
 
 int raft_raw_node_ready_without_accept(raft_raw_node_t *raw_node,
                                        raft_ready_t **ready) {
-    return raw_node_build_ready(raw_node, ready);
+    int result;
+
+    if (ready == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    result = raw_node_build_ready(raw_node, ready);
+    return raw_node == NULL
+               ? result
+               : raft_core_latch_error(&raw_node->raft, result);
 }
 
 static bool raft_must_sync(const raft_hard_state_t *st,
@@ -1393,14 +1422,17 @@ fail:
 }
 
 // helper function
-int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
-                               const raft_ready_t *ready) {
+static int raw_node_accept_ready_once(raft_raw_node_t *raw_node,
+                                      const raft_ready_t *ready) {
     const raft_entry_t *last;
     uint64_t applying_size;
     int result;
 
     if (raw_node == NULL || ready == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    if (raw_node->raft.error != RAFT_OK) {
+        return raw_node->raft.error;
     }
     if ((!raw_node->config.async_storage_writes &&
          raw_node->ready_accepted) ||
@@ -1460,6 +1492,17 @@ int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
 fail:
     raft_message_vec_free(&raw_node->steps_on_advance);
     return result;
+}
+
+int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
+                               const raft_ready_t *ready) {
+    int result;
+
+    if (raw_node == NULL || ready == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    result = raw_node_accept_ready_once(raw_node, ready);
+    return raft_core_latch_error(&raw_node->raft, result);
 }
 
 bool raft_raw_node_has_ready(const raft_raw_node_t *raw_node) {
@@ -1585,6 +1628,9 @@ int raft_raw_node_advance(raft_raw_node_t *raw_node) {
     if (raw_node == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
+    if (raw_node->raft.error != RAFT_OK) {
+        return raw_node->raft.error;
+    }
     if (raw_node->config.async_storage_writes) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
@@ -1595,7 +1641,7 @@ int raft_raw_node_advance(raft_raw_node_t *raw_node) {
         result = raw_step_after_append_message(
             raw_node, &raw_node->steps_on_advance.items[i]);
         if (result != RAFT_OK) {
-            raw_node->raft.error = result;
+            raft_core_latch_error(&raw_node->raft, result);
             break;
         }
     }

@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define RAFT_ALLOC_REPLACE_STDLIB
+#include "alloc.h"
+
 typedef enum core_campaign_type {
     CORE_CAMPAIGN_PRE_ELECTION,
     CORE_CAMPAIGN_ELECTION,
@@ -44,6 +47,22 @@ static bool core_array_valid(const void *items, size_t len) {
 static bool core_hard_state_empty(const raft_hard_state_t *state) {
     return state->term == 0 && state->vote == RAFT_NONE &&
            state->commit == 0;
+}
+
+bool raft_result_is_terminal(int result) {
+    return result == RAFT_ERR_STORAGE_COMPACTED ||
+           result == RAFT_ERR_STORAGE_UNAVAILABLE ||
+           result == RAFT_ERR_PANIC_FROM_GO_CALLBACK ||
+           result == RAFT_ERR_OUT_OF_MEMORY ||
+           result == RAFT_ERR_FATAL;
+}
+
+int raft_core_latch_error(raft_t *raft, int result) {
+    if (raft != NULL && raft->error == RAFT_OK &&
+        raft_result_is_terminal(result)) {
+        raft->error = result;
+    }
+    return result;
 }
 
 static int core_uint64_vec_copy(raft_uint64_vec_t *dst,
@@ -981,11 +1000,22 @@ static int core_handle_vote(raft_t *raft,
         raft->vote == message->from ||
         (raft->vote == RAFT_NONE && raft->lead == RAFT_NONE) ||
         (pre_vote && message->term > raft->term);
-    bool up_to_date = raft_log_is_up_to_date(
-        raft->log, message->index, message->log_term);
-    bool grant = can_vote && up_to_date &&
-                 raft_is_valid_node_id(message->from);
-    uint64_t response_term = grant ? message->term : raft->term;
+    bool up_to_date;
+    bool grant;
+    uint64_t response_term;
+    int result;
+
+    result = raft_log_is_up_to_date(
+        raft->log,
+        message->index,
+        message->log_term,
+        &up_to_date);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    grant = can_vote && up_to_date &&
+            raft_is_valid_node_id(message->from);
+    response_term = grant ? message->term : raft->term;
 
     if (grant && !pre_vote) {
         raft->vote = message->from;
@@ -1205,6 +1235,7 @@ static int core_restore_snapshot(raft_t *raft,
                                  const raft_snapshot_t *snapshot,
                                  bool *restored) {
     raft_progress_tracker_t replacement;
+    bool matches;
     int result;
 
     if (raft == NULL || !raft_snapshot_valid(snapshot) ||
@@ -1222,9 +1253,15 @@ static int core_restore_snapshot(raft_t *raft,
             &snapshot->metadata.conf_state, raft->id)) {
         return RAFT_OK;
     }
-    if (raft_log_match_term(raft->log,
-                            snapshot->metadata.index,
-                            snapshot->metadata.term)) {
+    result = raft_log_match_term(
+        raft->log,
+        snapshot->metadata.index,
+        snapshot->metadata.term,
+        &matches);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    if (matches) {
         return raft_log_commit_to(
             raft->log, snapshot->metadata.index);
     }
@@ -2075,6 +2112,7 @@ int raft_core_init(raft_t *raft,
         storage->handle, &hard_state, &conf_state);
     if (result != RAFT_OK) {
         raft_conf_state_free(&conf_state);
+        raft_core_free(raft);
         return result;
     }
     result = core_set_configuration(raft, &conf_state);
@@ -2195,9 +2233,10 @@ static int core_bootstrap_entry(raft_entry_t *entry,
     return RAFT_OK;
 }
 
-int raft_core_bootstrap(raft_t *raft,
-                        const raft_peer_view_t *peers,
-                        size_t peer_count) {
+static int core_bootstrap_once(raft_t *raft,
+                               const raft_peer_view_t *peers,
+                               size_t peer_count,
+                               bool *mutation_started) {
     raft_entry_t *entries;
     raft_conf_state_t state;
     uint64_t storage_last;
@@ -2206,10 +2245,17 @@ int raft_core_bootstrap(raft_t *raft,
     size_t j;
     int result;
 
+    if (mutation_started == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    *mutation_started = false;
     if (raft == NULL || peers == NULL || peer_count == 0 ||
         peer_count > UINT64_MAX ||
         peer_count > SIZE_MAX / sizeof(*entries)) {
         return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    if (raft->error != RAFT_OK) {
+        return raft->error;
     }
     if (raft->tracker.progress_len != 0) {
         return RAFT_ERR_INVALID_ARGUMENT;
@@ -2233,6 +2279,7 @@ int raft_core_bootstrap(raft_t *raft,
             }
         }
     }
+    *mutation_started = true;
     result = core_become_follower(raft, 1, RAFT_NONE);
     if (result != RAFT_OK) {
         return result;
@@ -2270,6 +2317,16 @@ int raft_core_bootstrap(raft_t *raft,
         return result;
     }
     return raft_log_commit_to(raft->log, (uint64_t)peer_count);
+}
+
+int raft_core_bootstrap(raft_t *raft,
+                        const raft_peer_view_t *peers,
+                        size_t peer_count) {
+    bool mutation_started;
+    int result =
+        core_bootstrap_once(raft, peers, peer_count, &mutation_started);
+
+    return mutation_started ? raft_core_latch_error(raft, result) : result;
 }
 
 int raft_core_tick(raft_t *raft) {
@@ -2323,32 +2380,31 @@ int raft_core_tick(raft_t *raft) {
         }
     }
 done:
-    if (result == RAFT_ERR_FATAL ||
-        result == RAFT_ERR_OUT_OF_MEMORY ||
-        result == RAFT_ERR_PANIC_FROM_GO_CALLBACK) {
-        raft->error = result;
-    }
-    return result;
+    return raft_core_latch_error(raft, result);
 }
 
 void raft_core_tick_quiesced(raft_t *raft) {
-    if (raft != NULL && raft->election_elapsed != UINT64_MAX) {
+    if (raft != NULL && raft->error == RAFT_OK &&
+        raft->election_elapsed != UINT64_MAX) {
         ++raft->election_elapsed;
     }
 }
 
 int raft_core_campaign(raft_t *raft) {
+    int result;
+
     if (raft == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     if (raft->error != RAFT_OK) {
         return raft->error;
     }
-    return core_hup(
+    result = core_hup(
         raft,
         raft->pre_vote
             ? CORE_CAMPAIGN_PRE_ELECTION
             : CORE_CAMPAIGN_ELECTION);
+    return raft_core_latch_error(raft, result);
 }
 
 static int core_propose_entry(raft_t *raft,
@@ -2384,10 +2440,13 @@ int raft_core_propose_conf_change_v1(
     if (raft == NULL || change == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
+    if (raft->error != RAFT_OK) {
+        return raft->error;
+    }
     memset(&encoded, 0, sizeof(encoded));
     result = raft_confchange_encode_v1(change, &encoded);
     if (result != RAFT_OK) {
-        return result;
+        return raft_core_latch_error(raft, result);
     }
     view = (raft_byte_view_t){
         .data = encoded.data,
@@ -2409,6 +2468,9 @@ int raft_core_propose_conf_change_v2(
     if (raft == NULL) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
+    if (raft->error != RAFT_OK) {
+        return raft->error;
+    }
     if (change == NULL) {
         view = (raft_byte_view_t){NULL, 0, true};
         return core_propose_entry(
@@ -2417,7 +2479,7 @@ int raft_core_propose_conf_change_v2(
     memset(&encoded, 0, sizeof(encoded));
     result = raft_confchange_encode_v2(change, &encoded);
     if (result != RAFT_OK) {
-        return result;
+        return raft_core_latch_error(raft, result);
     }
     view = (raft_byte_view_t){
         .data = encoded.data,
@@ -2430,7 +2492,7 @@ int raft_core_propose_conf_change_v2(
     return result;
 }
 
-int raft_core_apply_conf_change(
+static int core_apply_conf_change_once(
     raft_t *raft,
     const raft_conf_change_v2_view_t *change,
     raft_conf_state_t *out) {
@@ -2497,6 +2559,17 @@ int raft_core_apply_conf_change(
         raft->lead_transferee = RAFT_NONE;
     }
     return result;
+}
+
+int raft_core_apply_conf_change(
+    raft_t *raft,
+    const raft_conf_change_v2_view_t *change,
+    raft_conf_state_t *out) {
+    if (raft != NULL && raft->error != RAFT_OK) {
+        return raft->error;
+    }
+    return raft_core_latch_error(
+        raft, core_apply_conf_change_once(raft, change, out));
 }
 
 int raft_core_maybe_auto_leave(raft_t *raft, uint64_t applied) {
@@ -2575,7 +2648,8 @@ static int core_handle_storage_apply_response(
         raft, entries->items[entries->len - 1].index);
 }
 
-int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
+static int core_step_once(raft_t *raft,
+                          const raft_message_view_t *message) {
     int result;
 
     if (raft == NULL || !raft_message_view_valid(message)) {
@@ -2680,6 +2754,10 @@ int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
         default:
             return RAFT_ERR_FATAL;
     }
+}
+
+int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
+    return raft_core_latch_error(raft, core_step_once(raft, message));
 }
 
 void raft_core_hard_state(const raft_t *raft, raft_hard_state_t *state) {

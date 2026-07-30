@@ -90,3 +90,11 @@ func storageErrorCode(err error) C.int {
 		return C.RAFT_ERR_FATAL
 	}
 }
+
+func cErrorCanCarryStorageDetail(err error) bool {
+	return errors.Is(err, ErrCompacted) ||
+		errors.Is(err, ErrUnavailable) ||
+		errors.Is(err, ErrSnapshotTemporarilyUnavailable) ||
+		errors.Is(err, errCCallbackPanic) ||
+		errors.Is(err, errCFatal)
+}

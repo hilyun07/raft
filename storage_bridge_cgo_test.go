@@ -360,8 +360,8 @@ func TestCGoStorageCallbackRejectsInvalidGoResults(t *testing.T) {
 			}
 			handle, _ := newStorageCallbackHandle(storage)
 			defer handle.Delete()
-			if got := storageCallbackError(test.run(handle)); !errors.Is(got, errCInvalidArgument) {
-				t.Fatalf("callback error = %v, want %v", got, errCInvalidArgument)
+			if got := storageCallbackError(test.run(handle)); !errors.Is(got, errCFatal) {
+				t.Fatalf("callback error = %v, want %v", got, errCFatal)
 			}
 		})
 	}
@@ -431,16 +431,19 @@ func TestCGoRawNodeInitializesLogFromStorage(t *testing.T) {
 
 func TestCGoRawNodeLogInitializationErrorDeletesHandle(t *testing.T) {
 	cfg := cgoSkeletonConfig()
+	cfg.Logger = discardLogger
 	cfg.Storage = &callbackTestStorage{
 		firstIndex: func() (uint64, error) {
 			return 0, ErrUnavailable
 		},
 	}
 	var observed cgo.Handle
-	if _, err := newRawNode(cfg, func(handle cgo.Handle) {
-		observed = handle
-	}); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("NewRawNode error = %v, want %v", err, ErrUnavailable)
+	if recovered := cgoCapturePanic(func() {
+		_, _ = newRawNode(cfg, func(handle cgo.Handle) {
+			observed = handle
+		})
+	}); recovered == nil {
+		t.Fatal("NewRawNode storage initialization error did not panic")
 	}
 	if observed == 0 {
 		t.Fatal("storage handle was not created before log initialization")

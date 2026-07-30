@@ -20,6 +20,7 @@
 // The C implementation lives in a separate subtree so default pure-Go builds
 // never require a C compiler. This tagged translation unit incorporates it
 // only for the opt-in cgo binding build.
+#include "alloc.c"
 #include "random.c"
 #include "unstable.c"
 #include "log.c"
