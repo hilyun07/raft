@@ -159,6 +159,35 @@ func TestCGoRawNodeConfigValidation(t *testing.T) {
 	}
 }
 
+func TestCGoRawNodeReadIndexOwnsRequestContext(t *testing.T) {
+	rn, storage := prepareReadIndexParityLeader(
+		t, ReadOnlySafe, false)
+	requestContext := []byte("owned")
+	rn.ReadIndex(requestContext)
+	requestContext[0] = 'X'
+
+	heartbeatReady := rn.Ready()
+	heartbeat := lastReadIndexHeartbeat(
+		t, heartbeatReady.Messages, 2)
+	heartbeatContext := append([]byte(nil), heartbeat.GetContext()...)
+	persistReadIndexReady(t, rn, storage, heartbeatReady)
+	if err := rn.Step(&pb.Message{
+		Type:    pb.MsgHeartbeatResp.Enum(),
+		To:      new(uint64(1)),
+		From:    new(uint64(2)),
+		Term:    new(uint64(2)),
+		Context: heartbeatContext,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	readReady := rn.Ready()
+	if len(readReady.ReadStates) != 1 ||
+		!bytes.Equal(readReady.ReadStates[0].RequestCtx, []byte("owned")) {
+		t.Fatalf("owned ReadState = %+v", readReady.ReadStates)
+	}
+	persistReadIndexReady(t, rn, storage, readReady)
+}
+
 func cgoPersistAndAdvance(t *testing.T, rn *RawNode, storage *MemoryStorage, rd Ready) {
 	t.Helper()
 	if err := storage.Append(rd.Entries); err != nil {

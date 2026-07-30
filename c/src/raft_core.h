@@ -17,6 +17,7 @@
 
 #include "confchange.h"
 #include "log.h"
+#include "read_only.h"
 
 typedef struct raft {
     uint64_t id;
@@ -44,6 +45,11 @@ typedef struct raft {
     bool disable_proposal_forwarding;
     bool disable_conf_change_validation;
     bool step_down_on_removal;
+    bool check_quorum;
+
+    raft_read_only_internal_t read_only;
+    raft_message_vec_t pending_read_index_messages;
+    raft_read_state_vec_t read_states;
 
     // Sticky fatal/callback/storage failure produced by a void Tick call.
     int error;
@@ -82,7 +88,10 @@ int raft_core_progress_snapshot(const raft_t *raft,
 int raft_core_conf_state_copy(const raft_t *raft, raft_conf_state_t *out);
 int raft_core_ready_messages_copy(const raft_t *raft,
                                   raft_message_vec_t *out);
+int raft_core_ready_read_states_copy(const raft_t *raft,
+                                     raft_read_state_vec_t *out);
 void raft_core_clear_messages(raft_t *raft);
+void raft_core_clear_read_states(raft_t *raft);
 void raft_core_reduce_uncommitted(raft_t *raft, uint64_t payload_size);
 
 #endif  // ETCD_RAFT_CORE_H

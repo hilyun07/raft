@@ -187,20 +187,13 @@ Before Phase 3 is considered complete:
 - ownership and error mappings must follow
   `READY_OWNERSHIP_FOR_C_PORT.md` and `ERROR_MAPPING_FOR_C_PORT.md`.
 
-## Phase 7 implementation status
+## Current implementation status through Phase 10
 
-The opt-in C backend now implements the minimal synchronous subset for
-`Bootstrap`, `Tick`, `TickQuiesced`, `Campaign`, normal `Propose`, public and
-Node-internal `Step`, `HasReady`, `Ready`, preview/accept, `Advance`,
-`BasicStatus`, `Status`, `HasProgress`, `WithProgress` snapshots, and
-`ForgetLeader`.
+The opt-in C backend implements the synchronous RawNode core, tracker and
+joint membership changes, snapshot send/restore/report paths, ReadIndex,
+`ReadOnlySafe`, `ReadOnlyLeaseBased`, CheckQuorum, and lease-aware
+ForgetLeader behavior.
 
-`ProposeConfChange`, `ApplyConfChange`, `ReadIndex`, transfer completion,
-snapshot reporting, unreachable reporting, and the async-storage protocol
-remain explicit `RAFT_ERR_NOT_IMPLEMENTED` operations. The C constructor also
-rejects `PreVote`, `CheckQuorum`, lease reads, and `AsyncStorageWrites` with
-that error rather than silently applying incomplete semantics.
-
-Phase 7 uses a simple voter majority and per-member Match/Next snapshot. Full
-tracker inflights, joint quorums, learner promotion, and flow-control windows
-remain later work.
+PreVote, leadership transfer, ReportUnreachable, and the async-storage
+protocol remain explicit `RAFT_ERR_NOT_IMPLEMENTED` operations. Randomized
+election timeout parity and TraceLogger integration also remain open.

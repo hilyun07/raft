@@ -144,8 +144,7 @@ normalizes zero `MaxCommittedSizePerReady`, `MaxUncommittedEntriesSize`, and
 uses election/heartbeat ticks, `MaxSizePerMsg`,
 `MaxUncommittedEntriesSize`, and `DisableProposalForwarding`.
 
-`MaxInflightMsgs` and `MaxInflightBytes` are validated and retained but are not
-yet active because full inflights/flow control is deferred. `PreVote`,
-`CheckQuorum`, lease reads, and `AsyncStorageWrites` are rejected with
-`RAFT_ERR_NOT_IMPLEMENTED`. This prevents a configuration from appearing
-accepted while running weaker semantics.
+`MaxInflightMsgs` and `MaxInflightBytes` now drive the Phase 8 tracker and
+flow-control implementation. Phase 10 activates CheckQuorum and both read-only
+modes; lease reads still require CheckQuorum during validation. `PreVote` and
+`AsyncStorageWrites` remain rejected with `RAFT_ERR_NOT_IMPLEMENTED`.

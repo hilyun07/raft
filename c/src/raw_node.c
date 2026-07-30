@@ -771,6 +771,10 @@ static int raw_node_build_ready(raft_raw_node_t *raw_node,
             &raw_node->log, true, &ready->committed_entries);
     }
     if (result == RAFT_OK) {
+        result = raft_core_ready_read_states_copy(
+            &raw_node->raft, &ready->read_states);
+    }
+    if (result == RAFT_OK) {
         result = raft_core_ready_messages_copy(
             &raw_node->raft, &ready->messages);
     }
@@ -832,9 +836,7 @@ int raft_raw_node_new(const raft_config_t *config,
     }
     // Subsystems not ported yet remain explicit rather than silently running
     // with incomplete semantics.
-    if (config->async_storage_writes || config->check_quorum ||
-        config->pre_vote ||
-        config->read_only_option == RAFT_READ_ONLY_LEASE_BASED) {
+    if (config->async_storage_writes || config->pre_vote) {
         return RAFT_ERR_NOT_IMPLEMENTED;
     }
 
@@ -1044,6 +1046,8 @@ int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
         return RAFT_ERR_INVALID_ARGUMENT;
     }
     if ((ready->entries.len != 0 && ready->entries.items == NULL) ||
+        (ready->read_states.len != 0 &&
+         ready->read_states.items == NULL) ||
         (ready->committed_entries.len != 0 &&
          ready->committed_entries.items == NULL) ||
         (ready->messages.len != 0 && ready->messages.items == NULL)) {
@@ -1091,6 +1095,9 @@ int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
     if (ready->has_hard_state) {
         raw_node->previous_hard_state = ready->hard_state;
     }
+    if (ready->read_states.len != 0) {
+        raft_core_clear_read_states(&raw_node->raft);
+    }
     raft_core_clear_messages(&raw_node->raft);
     raft_log_accept_unstable(&raw_node->log);
     raw_node->ready_accepted = true;
@@ -1120,6 +1127,7 @@ bool raft_raw_node_has_ready(const raft_raw_node_t *raw_node) {
            raft_log_has_next_unstable_entries(&raw_node->log) ||
            raft_log_has_next_unstable_snapshot(&raw_node->log) ||
            raft_log_has_next_committed_entries(&raw_node->log, true) ||
+           raw_node->raft.read_states.len != 0 ||
            raw_node->raft.messages.len != 0;
 }
 
@@ -1282,11 +1290,22 @@ int raft_raw_node_forget_leader(raft_raw_node_t *raw_node) {
 
 int raft_raw_node_read_index(raft_raw_node_t *raw_node,
                              const raft_byte_view_t *request_context) {
+    raft_entry_view_t entry;
+    raft_message_view_t message;
+
     if (raw_node == NULL ||
         !raft_byte_view_valid(request_context)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    return RAFT_ERR_NOT_IMPLEMENTED;
+    memset(&entry, 0, sizeof(entry));
+    entry.type = RAFT_ENTRY_NORMAL;
+    entry.data = *request_context;
+    memset(&message, 0, sizeof(message));
+    message.type = RAFT_MSG_READ_INDEX;
+    message.entries.items = &entry;
+    message.entries.len = 1;
+    message.context.is_nil = true;
+    return raft_core_step(&raw_node->raft, &message);
 }
 
 int raft_raw_node_read_index_from_parts(

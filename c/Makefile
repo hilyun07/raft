@@ -16,12 +16,14 @@ OBJECTS := \
 	$(BUILD_DIR)/log.o \
 	$(BUILD_DIR)/tracker.o \
 	$(BUILD_DIR)/confchange.o \
+	$(BUILD_DIR)/read_only.o \
 	$(BUILD_DIR)/raft_core.o \
 	$(BUILD_DIR)/raw_node.o
 TEST_BINARIES := \
 	$(BUILD_DIR)/raw_node_skeleton_test \
 	$(BUILD_DIR)/raft_core_test \
 	$(BUILD_DIR)/snapshot_test \
+	$(BUILD_DIR)/read_only_test \
 	$(BUILD_DIR)/tracker_test \
 	$(BUILD_DIR)/confchange_test \
 	$(BUILD_DIR)/unstable_test \
@@ -49,11 +51,15 @@ $(BUILD_DIR)/confchange.o: src/confchange.c src/confchange.h src/tracker.h inclu
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/raft_core.o: src/raft_core.c src/raft_core.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/read_only.o: src/read_only.c src/read_only.h src/tracker.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
-$(BUILD_DIR)/raw_node.o: src/raw_node.c src/raft_internal.h src/raft_core.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+$(BUILD_DIR)/raft_core.o: src/raft_core.c src/raft_core.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
+		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
+
+$(BUILD_DIR)/raw_node.o: src/raw_node.c src/raft_internal.h src/raft_core.h src/read_only.h src/confchange.h src/tracker.h src/log.h src/unstable.h include/raft/raft.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) -c $< -o $@
 
@@ -69,6 +75,10 @@ $(BUILD_DIR)/raft_core_test: tests/raft_core_test.c include/raft/raft.h $(LIBRAR
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
 
 $(BUILD_DIR)/snapshot_test: tests/snapshot_test.c include/raft/raft.h $(LIBRARY)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
+		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
+
+$(BUILD_DIR)/read_only_test: tests/read_only_test.c src/read_only.h src/tracker.h include/raft/raft.h $(LIBRARY)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(STANDARD) \
 		-I$(PUBLIC_INCLUDE) -I$(PRIVATE_INCLUDE) $< $(LIBRARY) -o $@
 
@@ -93,6 +103,7 @@ test: $(TEST_BINARIES)
 	$(BUILD_DIR)/raw_node_skeleton_test
 	$(BUILD_DIR)/raft_core_test
 	$(BUILD_DIR)/snapshot_test
+	$(BUILD_DIR)/read_only_test
 	$(BUILD_DIR)/tracker_test
 	$(BUILD_DIR)/confchange_test
 	$(BUILD_DIR)/unstable_test

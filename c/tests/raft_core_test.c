@@ -149,6 +149,15 @@ static raft_raw_node_t *new_node(uint64_t id, test_storage_t *storage) {
     return node;
 }
 
+static raft_raw_node_t *new_node_with_config(
+    raft_config_t cfg, test_storage_t *storage) {
+    raft_raw_node_t *node = NULL;
+    raft_storage_ops_t ops = storage_ops(storage);
+    assert(raft_raw_node_new(&cfg, &ops, &node) == RAFT_OK);
+    assert(node != NULL);
+    return node;
+}
+
 static void bootstrap_three(raft_raw_node_t *node) {
     const raft_peer_view_t peers[] = {
         {.id = 1, .context = {NULL, 0, true}},
@@ -214,6 +223,33 @@ static int step_owned(raft_raw_node_t *node,
                          : raft_raw_node_step_for_node(node, &view);
     free(entries);
     return result;
+}
+
+static void elect_three_node_leader(raft_raw_node_t *node,
+                                    uint64_t term) {
+    const raft_message_view_t vote_response = {
+        .type = RAFT_MSG_VOTE_RESP,
+        .to = 1,
+        .from = 2,
+        .term = term,
+        .context = {NULL, 0, true},
+    };
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    assert(raft_raw_node_step(node, &vote_response) == RAFT_OK);
+}
+
+static void commit_leader_noop(raft_raw_node_t *node,
+                               uint64_t term,
+                               uint64_t index) {
+    const raft_message_view_t append_response = {
+        .type = RAFT_MSG_APP_RESP,
+        .to = 1,
+        .from = 2,
+        .term = term,
+        .index = index,
+        .context = {NULL, 0, true},
+    };
+    assert(raft_raw_node_step(node, &append_response) == RAFT_OK);
 }
 
 static void test_initial_state_and_configuration(void) {
@@ -551,12 +587,151 @@ static void test_unsupported_configuration_is_explicit(void) {
            RAFT_ERR_NOT_IMPLEMENTED);
     cfg = config(1);
     cfg.check_quorum = true;
-    assert(raft_raw_node_new(&cfg, &ops, &node) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_new(&cfg, &ops, &node) == RAFT_OK);
+    raft_raw_node_destroy(node);
+    node = NULL;
     cfg = config(1);
     cfg.async_storage_writes = true;
     assert(raft_raw_node_new(&cfg, &ops, &node) ==
            RAFT_ERR_NOT_IMPLEMENTED);
+}
+
+static void test_safe_read_index_and_stepdown(void) {
+    const uint64_t voters[] = {1, 2, 3};
+    test_storage_t storage = {
+        .hard_state = {.term = 1, .commit = 1},
+        .voters = voters,
+        .voter_count = 3,
+        .last_index = 1,
+        .last_term = 1,
+    };
+    raft_raw_node_t *node = new_node(1, &storage);
+    raft_ready_t *ready = NULL;
+    const raft_message_t *heartbeat;
+    uint8_t request_context[] = {'r', 'e', 'a', 'd'};
+    raft_byte_view_t request = {
+        .data = request_context,
+        .len = sizeof(request_context),
+        .is_nil = false,
+    };
+    raft_message_view_t heartbeat_response;
+
+    elect_three_node_leader(node, 2);
+    assert(raft_raw_node_read_index(node, &request) == RAFT_OK);
+    request_context[0] = 'X';
+    assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+    assert(ready->read_states.len == 0);
+    assert(find_message(ready, RAFT_MSG_HEARTBEAT, 2) == NULL);
+    raft_ready_destroy(ready);
+    ready = NULL;
+
+    commit_leader_noop(node, 2, 2);
+    assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+    heartbeat = find_message(ready, RAFT_MSG_HEARTBEAT, 2);
+    assert(heartbeat != NULL);
+    assert(!heartbeat->context.is_nil);
+    assert(heartbeat->context.len == 8);
+    memset(&heartbeat_response, 0, sizeof(heartbeat_response));
+    heartbeat_response.type = RAFT_MSG_HEARTBEAT_RESP;
+    heartbeat_response.to = 1;
+    heartbeat_response.from = 2;
+    heartbeat_response.term = 2;
+    heartbeat_response.context.data = heartbeat->context.data;
+    heartbeat_response.context.len = heartbeat->context.len;
+    heartbeat_response.context.is_nil = heartbeat->context.is_nil;
+    assert(raft_raw_node_step(node, &heartbeat_response) == RAFT_OK);
+    raft_ready_destroy(ready);
+    ready = NULL;
+
+    assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+    assert(ready->read_states.len == 1);
+    assert(ready->read_states.items[0].index == 2);
+    assert(ready->read_states.items[0].request_ctx.len == 4);
+    assert(ready->read_states.items[0].request_ctx.data[0] == 'r');
+    raft_ready_destroy(ready);
+    raft_raw_node_destroy(node);
+
+    storage.hard_state.term = 1;
+    storage.hard_state.commit = 1;
+    node = new_node(1, &storage);
+    elect_three_node_leader(node, 2);
+    commit_leader_noop(node, 2, 2);
+    request_context[0] = 'z';
+    assert(raft_raw_node_read_index(node, &request) == RAFT_OK);
+    assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+    heartbeat = find_message(ready, RAFT_MSG_HEARTBEAT, 2);
+    assert(heartbeat != NULL);
+    memset(&heartbeat_response, 0, sizeof(heartbeat_response));
+    heartbeat_response.type = RAFT_MSG_HEARTBEAT_RESP;
+    heartbeat_response.to = 1;
+    heartbeat_response.from = 2;
+    heartbeat_response.term = 2;
+    heartbeat_response.context.data = heartbeat->context.data;
+    heartbeat_response.context.len = heartbeat->context.len;
+    heartbeat_response.context.is_nil = heartbeat->context.is_nil;
+    {
+        const raft_message_view_t higher_term_heartbeat = {
+            .type = RAFT_MSG_HEARTBEAT,
+            .to = 1,
+            .from = 3,
+            .term = 3,
+            .context = {NULL, 0, true},
+        };
+        assert(raft_raw_node_step(
+                   node, &higher_term_heartbeat) == RAFT_OK);
+    }
+    assert(raft_raw_node_step(node, &heartbeat_response) == RAFT_OK);
+    raft_ready_destroy(ready);
+    ready = NULL;
+    assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+    assert(ready->read_states.len == 0);
+    raft_ready_destroy(ready);
+    raft_raw_node_destroy(node);
+}
+
+static void test_lease_read_and_check_quorum(void) {
+    const uint64_t voters[] = {1, 2, 3};
+    test_storage_t storage = {
+        .hard_state = {.term = 1, .commit = 1},
+        .voters = voters,
+        .voter_count = 3,
+        .last_index = 1,
+        .last_term = 1,
+    };
+    raft_config_t cfg = config(1);
+    raft_raw_node_t *node;
+    raft_ready_t *ready = NULL;
+    raft_basic_status_t status;
+    const uint8_t context_data[] = {'l'};
+    const raft_byte_view_t context = {
+        .data = context_data,
+        .len = sizeof(context_data),
+        .is_nil = false,
+    };
+    size_t i;
+
+    cfg.check_quorum = true;
+    cfg.read_only_option = RAFT_READ_ONLY_LEASE_BASED;
+    node = new_node_with_config(cfg, &storage);
+    elect_three_node_leader(node, 2);
+    commit_leader_noop(node, 2, 2);
+    assert(raft_raw_node_read_index(node, &context) == RAFT_OK);
+    assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+    assert(ready->read_states.len == 1);
+    assert(ready->read_states.items[0].index == 2);
+    assert(ready->read_states.items[0].request_ctx.len == 1);
+    assert(ready->read_states.items[0].request_ctx.data[0] == 'l');
+    raft_ready_destroy(ready);
+
+    // The append response above counts as activity for the first lease
+    // interval. A second inactive interval must expire before step-down.
+    for (i = 0; i < (size_t)cfg.election_tick * 2; ++i) {
+        raft_raw_node_tick(node);
+    }
+    assert(raft_raw_node_basic_status(node, &status) == RAFT_OK);
+    assert(status.soft_state.raft_state == RAFT_STATE_FOLLOWER);
+    assert(status.soft_state.lead == RAFT_NONE);
+    raft_raw_node_destroy(node);
 }
 
 static void test_uncommitted_proposal_limit(void) {
@@ -590,6 +765,8 @@ int main(void) {
     test_commit_only_ready_does_not_require_sync();
     test_election_replication_and_step_layering();
     test_unsupported_configuration_is_explicit();
+    test_safe_read_index_and_stepdown();
+    test_lease_read_and_check_quorum();
     test_uncommitted_proposal_limit();
     return 0;
 }

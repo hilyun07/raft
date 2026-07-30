@@ -92,3 +92,16 @@ must not be inferred from the minimal implementation:
 
 The constructor or operation returns `RAFT_ERR_NOT_IMPLEMENTED` where silently
 approximating these features would be unsafe.
+
+## Subsequent closure through Phase 10
+
+Later phases supersede the Phase 7 snapshot above:
+
+- Phase 8 completed the tracker, inflight, joint-quorum, learner, and
+  configuration-change items.
+- Phase 9 completed snapshot send, receive, restore, and report behavior.
+- Phase 10 completed ReadIndex, `ReadOnlySafe`, `ReadOnlyLeaseBased`,
+  CheckQuorum, and the lease-aware ForgetLeader interaction.
+
+PreVote, leadership transfer, ReportUnreachable, randomized election
+timeouts, and AsyncStorageWrites remain open.

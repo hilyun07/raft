@@ -24,6 +24,7 @@
 #include "log.c"
 #include "tracker.c"
 #include "confchange.c"
+#include "read_only.c"
 #include "raft_core.c"
 #include "raw_node.c"
 

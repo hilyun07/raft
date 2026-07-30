@@ -593,8 +593,8 @@ int raft_raw_node_step(raft_raw_node_t *raw_node,
 int raft_raw_node_step_for_node(raft_raw_node_t *raw_node,
                                 const raft_message_view_t *message);
 
-// Reports SoftState, HardState, unstable entries/snapshot, committed
-// entries, and queued outbound message work.
+// Reports SoftState, HardState, ReadStates, unstable entries/snapshot,
+// committed entries, and queued outbound message work.
 bool raft_raw_node_has_ready(const raft_raw_node_t *raw_node);
 // These functions return a C-owned outer descriptor and nested graph. A Go
 // binding converts the complete graph in one batch and calls
@@ -610,6 +610,8 @@ int raft_raw_node_accept_ready(raft_raw_node_t *raw_node,
 // or pass a pointer-bearing raft_ready_t back into C.
 int raft_raw_node_advance(raft_raw_node_t *raw_node);
 
+// Enqueues the same local MsgReadIndex request as Go RawNode.ReadIndex.
+// request_context is borrowed for this call and copied before retention.
 int raft_raw_node_read_index(raft_raw_node_t *raw_node,
                              const raft_byte_view_t *request_context);
 

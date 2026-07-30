@@ -224,7 +224,7 @@ static void test_lifecycle_and_minimal_core(void) {
            RAFT_ERR_FATAL);
     assert(raft_raw_node_read_index(
                raw_node, &(raft_byte_view_t){&byte, 1, 0}) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
     assert(raft_raw_node_transfer_leader(raw_node, 2) ==
            RAFT_ERR_NOT_IMPLEMENTED);
 
@@ -258,8 +258,15 @@ static void test_lifecycle_and_minimal_core(void) {
     ready = NULL;
     assert(raft_raw_node_advance(raw_node) == RAFT_OK);
 
-    assert(raft_raw_node_read_index(raw_node, nil_view()) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+    assert(raft_raw_node_read_index(raw_node, nil_view()) == RAFT_OK);
+    assert(raft_raw_node_ready_without_accept(raw_node, &ready) == RAFT_OK);
+    assert(ready->read_states.len == 1);
+    assert(ready->read_states.items[0].index >= 3);
+    assert(ready->read_states.items[0].request_ctx.is_nil);
+    assert(raft_raw_node_accept_ready(raw_node, ready) == RAFT_OK);
+    raft_ready_destroy(ready);
+    ready = NULL;
+    assert(raft_raw_node_advance(raw_node) == RAFT_OK);
     assert(raft_raw_node_progress_snapshot(raw_node, &snapshots,
                                            &snapshot_len) == RAFT_OK);
     assert(snapshots != NULL);
@@ -322,6 +329,10 @@ static void test_invalid_arguments(void) {
     config.read_only_option = RAFT_READ_ONLY_LEASE_BASED;
     assert(raft_raw_node_new(&config, &storage, &raw_node) ==
            RAFT_ERR_INVALID_ARGUMENT);
+    config.check_quorum = true;
+    assert(raft_raw_node_new(&config, &storage, &raw_node) == RAFT_OK);
+    raft_raw_node_destroy(raw_node);
+    raw_node = NULL;
     config.read_only_option = (raft_read_only_option_t)99;
     assert(raft_raw_node_new(&config, &storage, &raw_node) ==
            RAFT_ERR_INVALID_ARGUMENT);
@@ -529,16 +540,16 @@ static void test_nil_empty_validation(void) {
            RAFT_ERR_INVALID_ARGUMENT);
 
     assert(raft_raw_node_read_index(raw_node, &empty_view) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
     assert(raft_raw_node_read_index(raw_node, nil_view()) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
     assert(raft_raw_node_read_index(
                raw_node, &(raft_byte_view_t){NULL, 1, 0}) ==
            RAFT_ERR_INVALID_ARGUMENT);
     assert(raft_raw_node_read_index_from_parts(raw_node, NULL, 0, true) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
     assert(raft_raw_node_read_index_from_parts(raw_node, NULL, 0, false) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
     assert(raft_raw_node_read_index_from_parts(raw_node, NULL, 1, false) ==
            RAFT_ERR_INVALID_ARGUMENT);
 
