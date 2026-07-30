@@ -126,9 +126,10 @@ accounting, tick behavior, proposal forwarding, and Ready pagination.
 
 ### Membership and advanced phases
 
-Phase 7 activates inflight flow control and config-change flags. Phases 9-10
-activate read-only, CheckQuorum, and PreVote interactions. Phase 11 activates
-the alternate async storage protocol.
+Phase 7 activates inflight flow control and config-change flags. Phase 10
+activates read-only and CheckQuorum. Phase 11 activates PreVote and its
+leadership-transfer/CheckQuorum interactions. The alternate async storage
+protocol remains pending.
 
 ### Required tests
 
@@ -146,5 +147,6 @@ uses election/heartbeat ticks, `MaxSizePerMsg`,
 
 `MaxInflightMsgs` and `MaxInflightBytes` now drive the Phase 8 tracker and
 flow-control implementation. Phase 10 activates CheckQuorum and both read-only
-modes; lease reads still require CheckQuorum during validation. `PreVote` and
-`AsyncStorageWrites` remain rejected with `RAFT_ERR_NOT_IMPLEMENTED`.
+modes; lease reads still require CheckQuorum during validation. Phase 11
+activates `PreVote`. `AsyncStorageWrites` remains rejected with
+`RAFT_ERR_NOT_IMPLEMENTED`.

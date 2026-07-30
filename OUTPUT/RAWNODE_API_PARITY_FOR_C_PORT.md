@@ -187,13 +187,16 @@ Before Phase 3 is considered complete:
 - ownership and error mappings must follow
   `READY_OWNERSHIP_FOR_C_PORT.md` and `ERROR_MAPPING_FOR_C_PORT.md`.
 
-## Current implementation status through Phase 10
+## Current implementation status through Phase 11
 
 The opt-in C backend implements the synchronous RawNode core, tracker and
 joint membership changes, snapshot send/restore/report paths, ReadIndex,
 `ReadOnlySafe`, `ReadOnlyLeaseBased`, CheckQuorum, and lease-aware
-ForgetLeader behavior.
+ForgetLeader behavior. Phase 11 adds PreVote and leadership transfer,
+including pre-candidate term rules, transfer catch-up and timeout,
+`MsgTimeoutNow`, the `CampaignTransfer` lease bypass, follower forwarding,
+proposal suppression, and transfer target status.
 
-PreVote, leadership transfer, ReportUnreachable, and the async-storage
-protocol remain explicit `RAFT_ERR_NOT_IMPLEMENTED` operations. Randomized
-election timeout parity and TraceLogger integration also remain open.
+ReportUnreachable and the async-storage protocol remain explicit
+`RAFT_ERR_NOT_IMPLEMENTED` operations. Randomized election timeout parity and
+TraceLogger integration also remain open.

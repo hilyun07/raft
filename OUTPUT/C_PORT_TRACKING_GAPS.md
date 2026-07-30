@@ -93,7 +93,7 @@ must not be inferred from the minimal implementation:
 The constructor or operation returns `RAFT_ERR_NOT_IMPLEMENTED` where silently
 approximating these features would be unsafe.
 
-## Subsequent closure through Phase 10
+## Subsequent closure through Phase 11
 
 Later phases supersede the Phase 7 snapshot above:
 
@@ -102,6 +102,9 @@ Later phases supersede the Phase 7 snapshot above:
 - Phase 9 completed snapshot send, receive, restore, and report behavior.
 - Phase 10 completed ReadIndex, `ReadOnlySafe`, `ReadOnlyLeaseBased`,
   CheckQuorum, and the lease-aware ForgetLeader interaction.
+- Phase 11 completed PreVote, leadership transfer, `MsgTimeoutNow`,
+  transfer-aware CheckQuorum lease handling, and the committed-but-unapplied
+  configuration guard before campaigns.
 
-PreVote, leadership transfer, ReportUnreachable, randomized election
-timeouts, and AsyncStorageWrites remain open.
+ReportUnreachable, randomized election timeouts, and AsyncStorageWrites
+remain open.

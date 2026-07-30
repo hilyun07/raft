@@ -226,15 +226,18 @@ static void test_lifecycle_and_minimal_core(void) {
                raw_node, &(raft_byte_view_t){&byte, 1, 0}) ==
            RAFT_OK);
     assert(raft_raw_node_transfer_leader(raw_node, 2) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
 
     assert(raft_raw_node_bootstrap(raw_node, &peer, 1) == RAFT_OK);
     assert(raft_raw_node_has_progress(raw_node, 1));
+    // The committed bootstrap configuration must be applied before this
+    // node is eligible to campaign.
     assert(raft_raw_node_campaign(raw_node) == RAFT_OK);
     assert(raft_raw_node_propose(
                raw_node, &(raft_byte_view_t){&byte, 1, 0}) ==
-           RAFT_OK);
-    assert(raft_raw_node_propose(raw_node, nil_view()) == RAFT_OK);
+           RAFT_ERR_PROPOSAL_DROPPED);
+    assert(raft_raw_node_propose(raw_node, nil_view()) ==
+           RAFT_ERR_PROPOSAL_DROPPED);
     assert(raft_raw_node_has_ready(raw_node));
 
     // Public RawNode.Step rejects a locally generated message whose sender is
@@ -245,28 +248,18 @@ static void test_lifecycle_and_minimal_core(void) {
 
     assert(raft_raw_node_ready_without_accept(raw_node, &ready) == RAFT_OK);
     assert(ready != NULL);
-    assert(ready->entries.len >= 3);
-    assert(ready->committed_entries.len >= 3);
+    assert(ready->entries.len == 1);
+    assert(ready->committed_entries.len == 1);
     assert(ready->has_hard_state);
-    assert(ready->hard_state.term == 2);
-    assert(ready->hard_state.vote == 1);
-    assert(ready->hard_state.commit >= 3);
-    assert(ready->has_soft_state);
-    assert(ready->soft_state.raft_state == RAFT_STATE_LEADER);
+    assert(ready->hard_state.term == 1);
+    assert(ready->hard_state.vote == RAFT_NONE);
+    assert(ready->hard_state.commit == 1);
+    assert(!ready->has_soft_state);
     assert(raft_raw_node_accept_ready(raw_node, ready) == RAFT_OK);
     raft_ready_destroy(ready);
     ready = NULL;
     assert(raft_raw_node_advance(raw_node) == RAFT_OK);
 
-    assert(raft_raw_node_read_index(raw_node, nil_view()) == RAFT_OK);
-    assert(raft_raw_node_ready_without_accept(raw_node, &ready) == RAFT_OK);
-    assert(ready->read_states.len == 1);
-    assert(ready->read_states.items[0].index >= 3);
-    assert(ready->read_states.items[0].request_ctx.is_nil);
-    assert(raft_raw_node_accept_ready(raw_node, ready) == RAFT_OK);
-    raft_ready_destroy(ready);
-    ready = NULL;
-    assert(raft_raw_node_advance(raw_node) == RAFT_OK);
     assert(raft_raw_node_progress_snapshot(raw_node, &snapshots,
                                            &snapshot_len) == RAFT_OK);
     assert(snapshots != NULL);
@@ -280,7 +273,7 @@ static void test_lifecycle_and_minimal_core(void) {
     // Go Node.TransferLeadership routes this message through the Node actor
     // helper; it does not require a separate two-ID C RawNode function.
     assert(raft_raw_node_step_for_node(raw_node, &transfer_message) ==
-           RAFT_ERR_NOT_IMPLEMENTED);
+           RAFT_OK);
     assert(raft_raw_node_report_unreachable(raw_node, 2) ==
            RAFT_ERR_NOT_IMPLEMENTED);
     assert(raft_raw_node_report_snapshot(raw_node, 2,

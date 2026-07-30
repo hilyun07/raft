@@ -836,7 +836,7 @@ int raft_raw_node_new(const raft_config_t *config,
     }
     // Subsystems not ported yet remain explicit rather than silently running
     // with incomplete semantics.
-    if (config->async_storage_writes || config->pre_vote) {
+    if (config->async_storage_writes) {
         return RAFT_ERR_NOT_IMPLEMENTED;
     }
 
@@ -1271,10 +1271,16 @@ int raft_raw_node_report_snapshot(raft_raw_node_t *raw_node,
 
 int raft_raw_node_transfer_leader(raft_raw_node_t *raw_node,
                                   uint64_t transferee) {
+    raft_message_view_t message;
+
     if (raw_node == NULL || !raft_is_valid_node_id(transferee)) {
         return RAFT_ERR_INVALID_ARGUMENT;
     }
-    return RAFT_ERR_NOT_IMPLEMENTED;
+    memset(&message, 0, sizeof(message));
+    message.type = RAFT_MSG_TRANSFER_LEADER;
+    message.from = transferee;
+    message.context.is_nil = true;
+    return raft_core_step(&raw_node->raft, &message);
 }
 
 int raft_raw_node_forget_leader(raft_raw_node_t *raw_node) {

@@ -18,7 +18,7 @@
 #include "raft_core.h"
 
 enum {
-    RAFT_RAW_NODE_ABI_VERSION = 13,
+    RAFT_RAW_NODE_ABI_VERSION = 14,
 };
 
 typedef struct raft_ready_completion {

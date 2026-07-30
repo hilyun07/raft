@@ -46,6 +46,7 @@ typedef struct raft {
     bool disable_conf_change_validation;
     bool step_down_on_removal;
     bool check_quorum;
+    bool pre_vote;
 
     raft_read_only_internal_t read_only;
     raft_message_vec_t pending_read_index_messages;

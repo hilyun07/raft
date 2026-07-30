@@ -77,9 +77,8 @@ func TestCGoRawNodeMinimalCoreLifecycleAndBoundary(t *testing.T) {
 		t.Fatalf("proposal without leader = %v, want proposal dropped", err)
 	}
 
-	if err := rn.Bootstrap([]Peer{{ID: 1, Context: []byte{}}}); err != nil {
-		t.Fatalf("Bootstrap: %v", err)
-	}
+	cgoBootstrapAndApply(
+		t, rn, storage, []Peer{{ID: 1, Context: []byte{}}})
 	if !rn.HasProgress(1) {
 		t.Fatal("bootstrapped RawNode does not report local progress")
 	}
@@ -106,8 +105,8 @@ func TestCGoRawNodeMinimalCoreLifecycleAndBoundary(t *testing.T) {
 	if rd.HardState.GetTerm() != 2 || rd.HardState.GetVote() != 1 {
 		t.Fatalf("Ready HardState = %+v, want term=2 vote=1", rd.HardState)
 	}
-	if len(rd.Entries) < 3 || len(rd.CommittedEntries) < 3 {
-		t.Fatalf("Ready entries=%d committed=%d, want bootstrap/no-op/proposal", len(rd.Entries), len(rd.CommittedEntries))
+	if len(rd.Entries) != 2 || len(rd.CommittedEntries) != 2 {
+		t.Fatalf("Ready entries=%d committed=%d, want no-op/proposal", len(rd.Entries), len(rd.CommittedEntries))
 	}
 	if err := storage.Append(rd.Entries); err != nil {
 		t.Fatal(err)
@@ -201,6 +200,16 @@ func cgoPersistAndAdvance(t *testing.T, rn *RawNode, storage *MemoryStorage, rd 
 	rn.Advance(rd)
 }
 
+func cgoBootstrapAndApply(
+	t *testing.T, rn *RawNode, storage *MemoryStorage, peers []Peer,
+) {
+	t.Helper()
+	if err := rn.Bootstrap(peers); err != nil {
+		t.Fatal(err)
+	}
+	cgoPersistAndAdvance(t, rn, storage, rn.Ready())
+}
+
 func cgoSingleLeader(t *testing.T) (*RawNode, *MemoryStorage) {
 	t.Helper()
 	cfg := cgoSkeletonConfig()
@@ -209,9 +218,7 @@ func cgoSingleLeader(t *testing.T) (*RawNode, *MemoryStorage) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rn.Bootstrap([]Peer{{ID: 1}}); err != nil {
-		t.Fatal(err)
-	}
+	cgoBootstrapAndApply(t, rn, storage, []Peer{{ID: 1}})
 	if err := rn.Campaign(); err != nil {
 		t.Fatal(err)
 	}
@@ -652,9 +659,7 @@ func TestCGoRawNodeLeaderRemoval(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer rn.destroy()
-			if err := rn.Bootstrap([]Peer{{ID: 1}}); err != nil {
-				t.Fatal(err)
-			}
+			cgoBootstrapAndApply(t, rn, storage, []Peer{{ID: 1}})
 			if err := rn.Campaign(); err != nil {
 				t.Fatal(err)
 			}

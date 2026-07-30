@@ -17,6 +17,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef enum core_campaign_type {
+    CORE_CAMPAIGN_PRE_ELECTION,
+    CORE_CAMPAIGN_ELECTION,
+    CORE_CAMPAIGN_TRANSFER,
+} core_campaign_type_t;
+
+static const uint8_t core_campaign_transfer_context[] =
+    "CampaignTransfer";
+
 static uint64_t core_min_u64(uint64_t left, uint64_t right) {
     return left < right ? left : right;
 }
@@ -419,6 +428,23 @@ static int core_become_candidate(raft_t *raft) {
     return RAFT_OK;
 }
 
+static int core_become_pre_candidate(raft_t *raft) {
+    raft_progress_internal_t *self;
+
+    if (raft->state == RAFT_STATE_LEADER) {
+        return RAFT_ERR_FATAL;
+    }
+    raft_tracker_reset_votes(&raft->tracker);
+    raft->lead = RAFT_NONE;
+    raft->state = RAFT_STATE_PRE_CANDIDATE;
+    self = core_find_progress(raft, raft->id);
+    if (self == NULL || self->is_learner) {
+        return RAFT_ERR_FATAL;
+    }
+    raft_tracker_record_vote(&raft->tracker, raft->id, true);
+    return RAFT_OK;
+}
+
 static uint64_t core_payload_size(const raft_entry_t *entries,
                                   size_t entry_count) {
     uint64_t size = 0;
@@ -543,12 +569,24 @@ static int core_become_leader(raft_t *raft) {
     return core_append_noop(raft);
 }
 
-static int core_send_vote_request(raft_t *raft, uint64_t to) {
+static int core_send_vote_request(raft_t *raft,
+                                  uint64_t to,
+                                  raft_message_type_t type,
+                                  uint64_t term,
+                                  core_campaign_type_t campaign_type) {
     raft_message_t message;
+    raft_byte_view_t transfer_context = {
+        core_campaign_transfer_context,
+        sizeof(core_campaign_transfer_context) - 1,
+        false,
+    };
     uint64_t last_index;
     uint64_t last_term;
     int result;
 
+    if (type != RAFT_MSG_VOTE && type != RAFT_MSG_PRE_VOTE) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
     result = raft_log_last_index(raft->log, &last_index);
     if (result != RAFT_OK) {
         return result;
@@ -557,11 +595,19 @@ static int core_send_vote_request(raft_t *raft, uint64_t to) {
     if (result != RAFT_OK) {
         return result;
     }
-    core_message_init(&message, RAFT_MSG_VOTE);
+    core_message_init(&message, type);
     message.to = to;
-    message.term = raft->term;
+    message.term = term;
     message.index = last_index;
     message.log_term = last_term;
+    if (campaign_type == CORE_CAMPAIGN_TRANSFER) {
+        result = raft_bytes_copy_from_view(
+            &message.context, &transfer_context);
+        if (result != RAFT_OK) {
+            raft_message_free(&message);
+            return result;
+        }
+    }
     result = core_send(raft, &message);
     raft_message_free(&message);
     return result;
@@ -768,20 +814,92 @@ static int core_broadcast_heartbeat(raft_t *raft) {
     return RAFT_OK;
 }
 
-static int core_campaign_election(raft_t *raft) {
+typedef struct core_conf_change_scan {
+    bool found;
+} core_conf_change_scan_t;
+
+static int core_scan_conf_changes(void *context,
+                                  const raft_entry_t *entries,
+                                  size_t entry_count) {
+    core_conf_change_scan_t *scan = context;
+    size_t i;
+
+    if (scan == NULL ||
+        (entry_count != 0 && entries == NULL)) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    for (i = 0; i < entry_count; ++i) {
+        if (entries[i].type == RAFT_ENTRY_CONF_CHANGE ||
+            entries[i].type == RAFT_ENTRY_CONF_CHANGE_V2) {
+            scan->found = true;
+        }
+    }
+    return RAFT_OK;
+}
+
+static int core_has_unapplied_conf_changes(
+    raft_t *raft, bool *has_changes) {
+    core_conf_change_scan_t scan = {false};
+    int result;
+
+    if (raft == NULL || has_changes == NULL) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    *has_changes = false;
+    if (raft->log->applied >= raft->log->committed) {
+        return RAFT_OK;
+    }
+    if (raft->log->committed == UINT64_MAX) {
+        return RAFT_ERR_FATAL;
+    }
+    result = raft_log_scan(
+        raft->log,
+        raft->log->applied + 1,
+        raft->log->committed + 1,
+        raft->log->max_applying_entries_size,
+        core_scan_conf_changes,
+        &scan);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    *has_changes = scan.found;
+    return RAFT_OK;
+}
+
+static int core_campaign(raft_t *raft, core_campaign_type_t campaign_type);
+
+static int core_campaign(raft_t *raft, core_campaign_type_t campaign_type) {
+    raft_message_type_t vote_type;
+    uint64_t term;
     size_t i;
     int result;
 
-    if (raft->state == RAFT_STATE_LEADER || !core_promotable(raft)) {
+    if (!core_promotable(raft)) {
         return RAFT_OK;
     }
-    result = core_become_candidate(raft);
+    if (campaign_type == CORE_CAMPAIGN_PRE_ELECTION) {
+        if (raft->term == UINT64_MAX) {
+            return RAFT_ERR_FATAL;
+        }
+        result = core_become_pre_candidate(raft);
+        vote_type = RAFT_MSG_PRE_VOTE;
+        term = raft->term + 1;
+    } else {
+        result = core_become_candidate(raft);
+        vote_type = RAFT_MSG_VOTE;
+        term = raft->term;
+    }
     if (result != RAFT_OK) {
         return result;
     }
     if (raft_tracker_vote_result(&raft->tracker) ==
         RAFT_VOTE_WON) {
-        return core_become_leader(raft);
+        if (campaign_type == CORE_CAMPAIGN_PRE_ELECTION) {
+            return core_campaign(raft, CORE_CAMPAIGN_ELECTION);
+        }
+        result = core_become_leader(raft);
+        return result == RAFT_OK ? core_broadcast_append(raft)
+                                 : result;
     }
     for (i = 0; i < raft->tracker.progress_len; ++i) {
         raft_progress_internal_t *progress =
@@ -791,7 +909,12 @@ static int core_campaign_election(raft_t *raft) {
             progress->id == raft->id) {
             continue;
         }
-        result = core_send_vote_request(raft, progress->id);
+        result = core_send_vote_request(
+            raft,
+            progress->id,
+            vote_type,
+            term,
+            campaign_type);
         if (result != RAFT_OK) {
             return result;
         }
@@ -799,14 +922,36 @@ static int core_campaign_election(raft_t *raft) {
     return RAFT_OK;
 }
 
+static int core_hup(raft_t *raft, core_campaign_type_t campaign_type) {
+    bool has_changes;
+    int result;
+
+    if (raft->state == RAFT_STATE_LEADER ||
+        !core_promotable(raft)) {
+        return RAFT_OK;
+    }
+    result = core_has_unapplied_conf_changes(
+        raft, &has_changes);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    return has_changes ? RAFT_OK
+                       : core_campaign(raft, campaign_type);
+}
+
 static int core_send_vote_response(raft_t *raft,
                                    uint64_t to,
                                    uint64_t term,
+                                   raft_message_type_t type,
                                    bool reject) {
     raft_message_t response;
     int result;
 
-    core_message_init(&response, RAFT_MSG_VOTE_RESP);
+    if (type != RAFT_MSG_VOTE_RESP &&
+        type != RAFT_MSG_PRE_VOTE_RESP) {
+        return RAFT_ERR_INVALID_ARGUMENT;
+    }
+    core_message_init(&response, type);
     response.to = to;
     response.term = term;
     response.reject = reject;
@@ -817,19 +962,29 @@ static int core_send_vote_response(raft_t *raft,
 
 static int core_handle_vote(raft_t *raft,
                             const raft_message_view_t *message) {
+    bool pre_vote = message->type == RAFT_MSG_PRE_VOTE;
+    raft_message_type_t response_type =
+        pre_vote ? RAFT_MSG_PRE_VOTE_RESP : RAFT_MSG_VOTE_RESP;
     bool can_vote =
-        raft->vote == RAFT_NONE || raft->vote == message->from;
+        raft->vote == message->from ||
+        (raft->vote == RAFT_NONE && raft->lead == RAFT_NONE) ||
+        (pre_vote && message->term > raft->term);
     bool up_to_date = raft_log_is_up_to_date(
         raft->log, message->index, message->log_term);
     bool grant = can_vote && up_to_date &&
                  raft_is_valid_node_id(message->from);
+    uint64_t response_term = grant ? message->term : raft->term;
 
-    if (grant) {
+    if (grant && !pre_vote) {
         raft->vote = message->from;
         raft->election_elapsed = 0;
     }
     return core_send_vote_response(
-        raft, message->from, message->term, !grant);
+        raft,
+        message->from,
+        response_term,
+        response_type,
+        !grant);
 }
 
 static int core_handle_vote_response(raft_t *raft,
@@ -837,9 +992,17 @@ static int core_handle_vote_response(raft_t *raft,
     raft_progress_internal_t *progress =
         core_find_progress(raft, message->from);
     raft_vote_result_internal_t vote_result;
+    raft_message_type_t expected_type;
     int result;
 
-    if (raft->state != RAFT_STATE_CANDIDATE || progress == NULL ||
+    if (raft->state == RAFT_STATE_PRE_CANDIDATE) {
+        expected_type = RAFT_MSG_PRE_VOTE_RESP;
+    } else if (raft->state == RAFT_STATE_CANDIDATE) {
+        expected_type = RAFT_MSG_VOTE_RESP;
+    } else {
+        return RAFT_OK;
+    }
+    if (message->type != expected_type || progress == NULL ||
         progress->is_learner) {
         return RAFT_OK;
     }
@@ -847,11 +1010,12 @@ static int core_handle_vote_response(raft_t *raft,
         &raft->tracker, message->from, !message->reject);
     vote_result = raft_tracker_vote_result(&raft->tracker);
     if (vote_result == RAFT_VOTE_WON) {
-        result = core_become_leader(raft);
-        if (result != RAFT_OK) {
-            return result;
+        if (raft->state == RAFT_STATE_PRE_CANDIDATE) {
+            return core_campaign(raft, CORE_CAMPAIGN_ELECTION);
         }
-        return core_broadcast_append(raft);
+        result = core_become_leader(raft);
+        return result == RAFT_OK ? core_broadcast_append(raft)
+                                 : result;
     }
     if (vote_result == RAFT_VOTE_LOST) {
         return core_become_follower(raft, raft->term, RAFT_NONE);
@@ -1394,6 +1558,21 @@ static int core_step_follower(raft_t *raft,
             raft->election_elapsed = 0;
             raft->lead = message->from;
             return core_handle_snapshot(raft, message);
+        case RAFT_MSG_TRANSFER_LEADER: {
+            raft_message_t forwarded;
+            int result;
+            if (raft->lead == RAFT_NONE) {
+                return RAFT_OK;
+            }
+            result = raft_message_copy_from_view(&forwarded, message);
+            if (result != RAFT_OK) {
+                return result;
+            }
+            forwarded.to = raft->lead;
+            result = core_send(raft, &forwarded);
+            raft_message_free(&forwarded);
+            return result;
+        }
         case RAFT_MSG_FORGET_LEADER:
             if (raft->read_only.option ==
                 RAFT_READ_ONLY_LEASE_BASED) {
@@ -1401,6 +1580,8 @@ static int core_step_follower(raft_t *raft,
             }
             raft->lead = RAFT_NONE;
             return RAFT_OK;
+        case RAFT_MSG_TIMEOUT_NOW:
+            return core_hup(raft, CORE_CAMPAIGN_TRANSFER);
         case RAFT_MSG_READ_INDEX: {
             raft_message_t forwarded;
             int result;
@@ -1470,6 +1651,7 @@ static int core_step_candidate(raft_t *raft,
                        : result;
         }
         case RAFT_MSG_VOTE_RESP:
+        case RAFT_MSG_PRE_VOTE_RESP:
             return core_handle_vote_response(raft, message);
         default:
             return RAFT_OK;
@@ -1576,9 +1758,12 @@ static int core_handle_append_response(
     }
     updated = raft_progress_maybe_update(
         progress, message->index);
-    if (updated ||
-        (progress->match_index == message->index &&
-         progress->state == RAFT_PROGRESS_STATE_PROBE)) {
+    if (!updated &&
+        progress->match_index == message->index &&
+        progress->state == RAFT_PROGRESS_STATE_PROBE) {
+        updated = true;
+    }
+    if (updated) {
         if (progress->state == RAFT_PROGRESS_STATE_PROBE) {
             raft_progress_become_replicate(progress);
         } else if (progress->state ==
@@ -1609,16 +1794,76 @@ static int core_handle_append_response(
         if (result != RAFT_OK) {
             return result;
         }
-        return core_broadcast_append(raft);
-    }
-    if (raft_progress_can_bump_commit(
-            progress, raft->log->committed)) {
+        result = core_broadcast_append(raft);
+    } else if (raft_progress_can_bump_commit(
+                   progress, raft->log->committed)) {
         result = core_send_append(raft, progress);
+    }
+    if (result != RAFT_OK) {
+        return result;
+    }
+    result = core_send_pending_entries(raft, progress);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    if (updated && message->from == raft->lead_transferee) {
+        uint64_t last_index;
+        result = raft_log_last_index(raft->log, &last_index);
         if (result != RAFT_OK) {
             return result;
         }
+        if (progress->match_index == last_index) {
+            raft_message_t timeout_now;
+            core_message_init(&timeout_now, RAFT_MSG_TIMEOUT_NOW);
+            timeout_now.to = message->from;
+            result = core_send(raft, &timeout_now);
+            raft_message_free(&timeout_now);
+            return result;
+        }
     }
-    return core_send_pending_entries(raft, progress);
+    return RAFT_OK;
+}
+
+static int core_send_timeout_now(raft_t *raft, uint64_t to) {
+    raft_message_t message;
+    int result;
+
+    core_message_init(&message, RAFT_MSG_TIMEOUT_NOW);
+    message.to = to;
+    result = core_send(raft, &message);
+    raft_message_free(&message);
+    return result;
+}
+
+static int core_handle_transfer_leader(
+    raft_t *raft, const raft_message_view_t *message) {
+    raft_progress_internal_t *progress =
+        core_find_progress(raft, message->from);
+    uint64_t last_index;
+    int result;
+
+    if (progress == NULL || progress->is_learner) {
+        return RAFT_OK;
+    }
+    if (raft->lead_transferee != RAFT_NONE) {
+        if (raft->lead_transferee == message->from) {
+            return RAFT_OK;
+        }
+        raft->lead_transferee = RAFT_NONE;
+    }
+    if (message->from == raft->id) {
+        return RAFT_OK;
+    }
+    result = raft_log_last_index(raft->log, &last_index);
+    if (result != RAFT_OK) {
+        return result;
+    }
+    raft->election_elapsed = 0;
+    raft->lead_transferee = message->from;
+    if (progress->match_index == last_index) {
+        return core_send_timeout_now(raft, message->from);
+    }
+    return core_send_append(raft, progress);
 }
 
 static int core_step_leader(raft_t *raft,
@@ -1731,6 +1976,8 @@ static int core_step_leader(raft_t *raft,
             progress->message_flow_paused = true;
             return RAFT_OK;
         }
+        case RAFT_MSG_TRANSFER_LEADER:
+            return core_handle_transfer_leader(raft, message);
         case RAFT_MSG_FORGET_LEADER:
             return RAFT_OK;
         default:
@@ -1772,6 +2019,7 @@ int raft_core_init(raft_t *raft,
         config->disable_conf_change_validation;
     raft->step_down_on_removal = config->step_down_on_removal;
     raft->check_quorum = config->check_quorum;
+    raft->pre_vote = config->pre_vote;
     raft->lead = RAFT_NONE;
     raft->vote = RAFT_NONE;
     raft->lead_transferee = RAFT_NONE;
@@ -2006,10 +2254,16 @@ int raft_core_tick(raft_t *raft) {
                 check.from = raft->id;
                 check.context.is_nil = true;
                 result = core_step_leader(raft, &check);
-                if (result != RAFT_OK ||
-                    raft->state != RAFT_STATE_LEADER) {
+                if (result != RAFT_OK) {
                     goto done;
                 }
+            }
+            if (raft->state == RAFT_STATE_LEADER &&
+                raft->lead_transferee != RAFT_NONE) {
+                raft->lead_transferee = RAFT_NONE;
+            }
+            if (raft->state != RAFT_STATE_LEADER) {
+                goto done;
             }
         }
         if (raft->heartbeat_elapsed >= raft->heartbeat_timeout) {
@@ -2022,7 +2276,11 @@ int raft_core_tick(raft_t *raft) {
             raft->election_elapsed >=
                 raft->randomized_election_timeout) {
             raft->election_elapsed = 0;
-            result = core_campaign_election(raft);
+            result = core_hup(
+                raft,
+                raft->pre_vote
+                    ? CORE_CAMPAIGN_PRE_ELECTION
+                    : CORE_CAMPAIGN_ELECTION);
         }
     }
 done:
@@ -2047,7 +2305,11 @@ int raft_core_campaign(raft_t *raft) {
     if (raft->error != RAFT_OK) {
         return raft->error;
     }
-    return core_campaign_election(raft);
+    return core_hup(
+        raft,
+        raft->pre_vote
+            ? CORE_CAMPAIGN_PRE_ELECTION
+            : CORE_CAMPAIGN_ELECTION);
 }
 
 static int core_propose_entry(raft_t *raft,
@@ -2222,11 +2484,7 @@ int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
     if (raft->error != RAFT_OK) {
         return raft->error;
     }
-    if (message->type == RAFT_MSG_PRE_VOTE ||
-        message->type == RAFT_MSG_PRE_VOTE_RESP ||
-        message->type == RAFT_MSG_UNREACHABLE ||
-        message->type == RAFT_MSG_TRANSFER_LEADER ||
-        message->type == RAFT_MSG_TIMEOUT_NOW ||
+    if (message->type == RAFT_MSG_UNREACHABLE ||
         message->type == RAFT_MSG_STORAGE_APPEND ||
         message->type == RAFT_MSG_STORAGE_APPEND_RESP ||
         message->type == RAFT_MSG_STORAGE_APPLY ||
@@ -2234,65 +2492,76 @@ int raft_core_step(raft_t *raft, const raft_message_view_t *message) {
         return RAFT_ERR_NOT_IMPLEMENTED;
     }
     if (message->term != 0 && message->term > raft->term) {
-        static const uint8_t campaign_transfer[] =
-            "CampaignTransfer";
+        bool vote_request =
+            message->type == RAFT_MSG_VOTE ||
+            message->type == RAFT_MSG_PRE_VOTE;
         bool forced_vote =
-            message->type == RAFT_MSG_VOTE &&
+            vote_request &&
             !message->context.is_nil &&
-            message->context.len == sizeof(campaign_transfer) - 1 &&
+            message->context.len ==
+                sizeof(core_campaign_transfer_context) - 1 &&
             memcmp(message->context.data,
-                   campaign_transfer,
-                   sizeof(campaign_transfer) - 1) == 0;
+                   core_campaign_transfer_context,
+                   sizeof(core_campaign_transfer_context) - 1) == 0;
         bool in_lease =
             raft->check_quorum && raft->lead != RAFT_NONE &&
             raft->election_elapsed < raft->election_timeout;
-        if (message->type == RAFT_MSG_VOTE &&
-            !forced_vote && in_lease) {
+        if (vote_request && !forced_vote && in_lease) {
             return RAFT_OK;
         }
-        uint64_t lead =
-            message->type == RAFT_MSG_APP ||
-                    message->type == RAFT_MSG_HEARTBEAT ||
-                    message->type == RAFT_MSG_SNAP
-                ? message->from
-                : RAFT_NONE;
-        result = core_become_follower(raft, message->term, lead);
-        if (result != RAFT_OK) {
-            return result;
+        if (message->type != RAFT_MSG_PRE_VOTE &&
+            (message->type != RAFT_MSG_PRE_VOTE_RESP ||
+             message->reject)) {
+            uint64_t lead =
+                message->type == RAFT_MSG_APP ||
+                        message->type == RAFT_MSG_HEARTBEAT ||
+                        message->type == RAFT_MSG_SNAP
+                    ? message->from
+                    : RAFT_NONE;
+            result = core_become_follower(
+                raft, message->term, lead);
+            if (result != RAFT_OK) {
+                return result;
+            }
         }
     } else if (message->term != 0 && message->term < raft->term) {
-        if (message->type == RAFT_MSG_VOTE) {
-            return core_send_vote_response(
-                raft, message->from, raft->term, true);
-        }
-        if (raft->check_quorum &&
+        if ((raft->check_quorum || raft->pre_vote) &&
             (message->type == RAFT_MSG_APP ||
              message->type == RAFT_MSG_HEARTBEAT)) {
             return core_send_append_response(
                 raft, message->from, 0, false, 0, 0);
         }
-        if (message->type == RAFT_MSG_APP ||
-            message->type == RAFT_MSG_HEARTBEAT) {
-            return core_send_append_response(
-                raft, message->from, 0, true, 0, 0);
+        if (message->type == RAFT_MSG_PRE_VOTE) {
+            return core_send_vote_response(
+                raft,
+                message->from,
+                raft->term,
+                RAFT_MSG_PRE_VOTE_RESP,
+                true);
         }
         return RAFT_OK;
     }
     if (message->type == RAFT_MSG_HUP) {
-        return core_campaign_election(raft);
+        return core_hup(
+            raft,
+            raft->pre_vote
+                ? CORE_CAMPAIGN_PRE_ELECTION
+                : CORE_CAMPAIGN_ELECTION);
     }
-    if (message->type == RAFT_MSG_VOTE) {
+    if (message->type == RAFT_MSG_VOTE ||
+        message->type == RAFT_MSG_PRE_VOTE) {
         return core_handle_vote(raft, message);
     }
     switch (raft->state) {
         case RAFT_STATE_FOLLOWER:
             return core_step_follower(raft, message);
         case RAFT_STATE_CANDIDATE:
+        case RAFT_STATE_PRE_CANDIDATE:
             return core_step_candidate(raft, message);
         case RAFT_STATE_LEADER:
             return core_step_leader(raft, message);
         default:
-            return RAFT_ERR_NOT_IMPLEMENTED;
+            return RAFT_ERR_FATAL;
     }
 }
 
