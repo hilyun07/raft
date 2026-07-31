@@ -2081,7 +2081,7 @@ static int core_step_leader(raft_t *raft,
             if (message->entries.len == 0) {
                 return RAFT_ERR_FATAL;
             }
-            if (!core_is_voter(raft, raft->id) ||
+            if (!raft_tracker_has_progress(&raft->tracker, raft->id) ||
                 raft->lead_transferee != RAFT_NONE) {
                 return RAFT_ERR_PROPOSAL_DROPPED;
             }

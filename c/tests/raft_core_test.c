@@ -1677,6 +1677,8 @@ static void test_leadership_transfer_paths(void) {
         .context = {NULL, 0, true},
     };
     size_t i;
+    uint64_t before_proposal;
+    uint64_t after_proposal;
 
     cfg.applied = 1;
     node = new_node_with_config(cfg, &storage);
@@ -1690,8 +1692,11 @@ static void test_leadership_transfer_paths(void) {
     assert(find_message(ready, RAFT_MSG_TIMEOUT_NOW, 2) != NULL);
     raft_ready_destroy(ready);
     ready = NULL;
+    assert(raft_log_last_index(&node->log, &before_proposal) == RAFT_OK);
     assert(raft_raw_node_propose(node, &proposal) ==
            RAFT_ERR_PROPOSAL_DROPPED);
+    assert(raft_log_last_index(&node->log, &after_proposal) == RAFT_OK);
+    assert(after_proposal == before_proposal);
 
     for (i = 0; i < cfg.election_tick; ++i) {
         raft_raw_node_tick(node);
@@ -1716,6 +1721,122 @@ static void test_leadership_transfer_paths(void) {
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
     assert(find_message(ready, RAFT_MSG_TIMEOUT_NOW, 3) != NULL);
     raft_ready_destroy(ready);
+    raft_raw_node_destroy(node);
+}
+
+static void test_demoted_leader_proposal_admission(void) {
+    const uint64_t voters[] = {1, 2};
+    const test_storage_t initial_storage = {
+        .hard_state = {.term = 1, .commit = 1},
+        .voters = voters,
+        .voter_count = 2,
+        .last_index = 1,
+        .last_term = 1,
+    };
+    const uint8_t first_data[] = {'o', 'k'};
+    const uint8_t second_data[] = {'g', 'o'};
+    const uint8_t blocked_data[] = {'x'};
+    const raft_byte_view_t first = {
+        .data = first_data,
+        .len = sizeof(first_data),
+        .is_nil = false,
+    };
+    const raft_byte_view_t second = {
+        .data = second_data,
+        .len = sizeof(second_data),
+        .is_nil = false,
+    };
+    const raft_byte_view_t blocked = {
+        .data = blocked_data,
+        .len = sizeof(blocked_data),
+        .is_nil = false,
+    };
+    test_storage_t storage;
+    raft_config_t cfg;
+    raft_raw_node_t *node;
+    raft_progress_internal_t *self;
+    raft_ready_t *ready = NULL;
+    uint64_t before;
+    uint64_t after;
+
+    // A normal voter leader still admits and appends proposals.
+    storage = initial_storage;
+    cfg = config(1);
+    cfg.applied = 1;
+    node = new_node_with_config(cfg, &storage);
+    elect_three_node_leader(node, &storage, 2);
+    assert(raft_log_last_index(&node->log, &before) == RAFT_OK);
+    assert(raft_raw_node_propose(node, &first) == RAFT_OK);
+    assert(raft_log_last_index(&node->log, &after) == RAFT_OK);
+    assert(after == before + 1);
+    raft_raw_node_destroy(node);
+
+    // Removing the leader deletes self Progress. With the compatibility
+    // default it remains leader, but proposals are still dropped.
+    storage = initial_storage;
+    cfg = config(1);
+    cfg.applied = 1;
+    node = new_node_with_config(cfg, &storage);
+    elect_three_node_leader(node, &storage, 2);
+    apply_voter_change(node, RAFT_CONF_CHANGE_REMOVE_NODE, 1);
+    assert_raft_state(node, RAFT_STATE_LEADER);
+    assert(!raft_tracker_has_progress(&node->raft.tracker, 1));
+    assert(raft_log_last_index(&node->log, &before) == RAFT_OK);
+    assert(raft_raw_node_propose(node, &first) ==
+           RAFT_ERR_PROPOSAL_DROPPED);
+    assert(raft_log_last_index(&node->log, &after) == RAFT_OK);
+    assert(after == before);
+    raft_raw_node_destroy(node);
+
+    // Demotion retains learner Progress. With StepDownOnRemoval=false, Go
+    // continues admitting proposals, including ordinary size enforcement.
+    storage = initial_storage;
+    cfg = config(1);
+    cfg.applied = 1;
+    cfg.max_uncommitted_entries_size = 4;
+    node = new_node_with_config(cfg, &storage);
+    elect_three_node_leader(node, &storage, 2);
+    apply_voter_change(
+        node, RAFT_CONF_CHANGE_ADD_LEARNER_NODE, 1);
+    assert_raft_state(node, RAFT_STATE_LEADER);
+    self = raft_tracker_find(&node->raft.tracker, 1);
+    assert(self != NULL);
+    assert(self->is_learner);
+    assert(!raft_tracker_is_voter(&node->raft.tracker, 1));
+    assert(raft_log_last_index(&node->log, &before) == RAFT_OK);
+    assert(raft_raw_node_propose(node, &first) == RAFT_OK);
+    assert(raft_raw_node_propose(node, &second) == RAFT_OK);
+    assert(raft_raw_node_propose(node, &blocked) ==
+           RAFT_ERR_PROPOSAL_DROPPED);
+    assert(raft_log_last_index(&node->log, &after) == RAFT_OK);
+    assert(after == before + 2);
+    assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
+    assert(ready->entries.len >= 2);
+    assert(ready->entries.items[ready->entries.len - 2].data.len == 2);
+    assert(ready->entries.items[ready->entries.len - 1].data.len == 2);
+    raft_ready_destroy(ready);
+    ready = NULL;
+    raft_raw_node_destroy(node);
+
+    // StepDownOnRemoval=true changes only the state transition. The retained
+    // learner Progress remains, but follower-without-leader semantics drop.
+    storage = initial_storage;
+    cfg = config(1);
+    cfg.applied = 1;
+    cfg.step_down_on_removal = true;
+    node = new_node_with_config(cfg, &storage);
+    elect_three_node_leader(node, &storage, 2);
+    apply_voter_change(
+        node, RAFT_CONF_CHANGE_ADD_LEARNER_NODE, 1);
+    assert_raft_state(node, RAFT_STATE_FOLLOWER);
+    self = raft_tracker_find(&node->raft.tracker, 1);
+    assert(self != NULL);
+    assert(self->is_learner);
+    assert(raft_log_last_index(&node->log, &before) == RAFT_OK);
+    assert(raft_raw_node_propose(node, &first) ==
+           RAFT_ERR_PROPOSAL_DROPPED);
+    assert(raft_log_last_index(&node->log, &after) == RAFT_OK);
+    assert(after == before);
     raft_raw_node_destroy(node);
 }
 
@@ -3107,6 +3228,7 @@ int main(void) {
     test_pre_vote_election_and_stale_log();
     test_pre_vote_check_quorum_and_forget_leader();
     test_leadership_transfer_paths();
+    test_demoted_leader_proposal_admission();
     test_transfer_forwarding_and_forced_campaign();
     test_safe_read_index_and_stepdown();
     test_lease_read_and_check_quorum();
