@@ -187,6 +187,7 @@ func panicWithLogger(logger Logger, operation string, err error) {
 func isCConstructorFatal(err error) bool {
 	return errors.Is(err, ErrCompacted) ||
 		errors.Is(err, ErrUnavailable) ||
+		errors.Is(err, ErrSnapshotTemporarilyUnavailable) ||
 		errors.Is(err, errCCallbackPanic) ||
 		errors.Is(err, errCOutOfMemory) ||
 		errors.Is(err, errCFatal)

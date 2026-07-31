@@ -191,6 +191,27 @@ static void test_constructor_failures_cleanup(void) {
     assert(node == NULL);
     storage.first_error = RAFT_OK;
 
+    storage.first_error =
+        RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE;
+    assert(raft_raw_node_new(&config, &ops, &node) ==
+           RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+    assert(node == NULL);
+    storage.first_error = RAFT_OK;
+
+    storage.last_error =
+        RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE;
+    assert(raft_raw_node_new(&config, &ops, &node) ==
+           RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+    assert(node == NULL);
+    storage.last_error = RAFT_OK;
+
+    storage.initial_error =
+        RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE;
+    assert(raft_raw_node_new(&config, &ops, &node) ==
+           RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+    assert(node == NULL);
+    storage.initial_error = RAFT_OK;
+
     storage.initial_error = RAFT_ERR_FATAL;
     assert(raft_raw_node_new(&config, &ops, &node) == RAFT_ERR_FATAL);
     assert(node == NULL);
@@ -220,12 +241,18 @@ static void test_bootstrap_pre_mutation_error_is_returned(void) {
     assert(raft_raw_node_bootstrap(node, &peer, 1) == RAFT_ERR_FATAL);
     assert(raft_raw_node_error(node) == RAFT_OK);
 
+    storage.last_error =
+        RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE;
+    assert(raft_raw_node_bootstrap(node, &peer, 1) ==
+           RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+    assert(raft_raw_node_error(node) == RAFT_OK);
+
     storage.last_error = RAFT_OK;
     assert(raft_raw_node_bootstrap(node, &peer, 1) == RAFT_OK);
     raft_raw_node_destroy(node);
 }
 
-static void assert_vote_storage_failure(bool for_node) {
+static void assert_vote_storage_failure(bool for_node, int failure) {
     failing_storage_t storage = {
         .last_index = 1,
         .last_term = 1,
@@ -244,22 +271,69 @@ static void assert_vote_storage_failure(bool for_node) {
     };
     int result;
 
-    storage.term_error = RAFT_ERR_FATAL;
+    storage.term_error = failure;
     result = for_node
                  ? raft_raw_node_step_for_node(node, &vote)
                  : raft_raw_node_step(node, &vote);
-    assert(result == RAFT_ERR_FATAL);
-    assert(raft_raw_node_error(node) == RAFT_ERR_FATAL);
-    assert(raft_raw_node_campaign(node) == RAFT_ERR_FATAL);
+    assert(result == failure);
+    assert(raft_raw_node_error(node) == failure);
+    assert(raft_raw_node_campaign(node) == failure);
     assert((for_node
                 ? raft_raw_node_step_for_node(node, &vote)
-                : raft_raw_node_step(node, &vote)) == RAFT_ERR_FATAL);
+                : raft_raw_node_step(node, &vote)) == failure);
     raft_raw_node_destroy(node);
 }
 
 static void test_rawnode_and_node_storage_failure(void) {
-    assert_vote_storage_failure(false);
-    assert_vote_storage_failure(true);
+    assert_vote_storage_failure(false, RAFT_ERR_FATAL);
+    assert_vote_storage_failure(true, RAFT_ERR_FATAL);
+    assert_vote_storage_failure(
+        false, RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+    assert_vote_storage_failure(
+        true, RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+}
+
+static void test_entries_snapshot_temporary_is_terminal(void) {
+    failing_storage_t storage = {
+        .last_index = 1,
+        .last_term = 1,
+        .voter = 1,
+        .voter2 = 2,
+    };
+    raft_raw_node_t *node = new_failing_node(&storage, false);
+    const raft_message_view_t vote_response = {
+        .type = RAFT_MSG_VOTE_RESP,
+        .to = 1,
+        .from = 2,
+        .term = 1,
+        .context = {NULL, 0, true},
+    };
+    const raft_message_view_t append_rejection = {
+        .type = RAFT_MSG_APP_RESP,
+        .to = 1,
+        .from = 2,
+        .term = 1,
+        .index = 1,
+        .reject = true,
+        .reject_hint = 0,
+        .context = {NULL, 0, true},
+    };
+    raft_ready_t *ready = NULL;
+
+    assert(raft_raw_node_campaign(node) == RAFT_OK);
+    assert(raft_raw_node_ready(node, &ready) == RAFT_OK);
+    raft_ready_destroy(ready);
+    assert(raft_raw_node_advance(node) == RAFT_OK);
+    assert(raft_raw_node_step(node, &vote_response) == RAFT_OK);
+    storage.entries_error =
+        RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE;
+    assert(raft_raw_node_step(node, &append_rejection) ==
+           RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+    assert(raft_raw_node_error(node) ==
+           RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+    assert(raft_raw_node_campaign(node) ==
+           RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+    raft_raw_node_destroy(node);
 }
 
 static void test_tick_surfaces_and_latches_storage_failure(void) {
@@ -343,6 +417,7 @@ int main(void) {
     test_constructor_failures_cleanup();
     test_bootstrap_pre_mutation_error_is_returned();
     test_rawnode_and_node_storage_failure();
+    test_entries_snapshot_temporary_is_terminal();
     test_tick_surfaces_and_latches_storage_failure();
     test_ready_allocation_failure_is_terminal();
     test_async_ready_nested_allocations_cleanup();

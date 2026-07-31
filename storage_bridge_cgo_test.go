@@ -392,6 +392,11 @@ func TestCGoStorageCallbackErrorAndPanicMapping(t *testing.T) {
 	}{
 		{name: "compacted", err: ErrCompacted, want: ErrCompacted},
 		{name: "unavailable", err: ErrUnavailable, want: ErrUnavailable},
+		{
+			name: "snapshot-temporary",
+			err:  ErrSnapshotTemporarilyUnavailable,
+			want: ErrSnapshotTemporarilyUnavailable,
+		},
 		{name: "unknown", err: errors.New("storage failed"), want: errCFatal},
 	} {
 		t.Run(test.name, func(t *testing.T) {

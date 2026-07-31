@@ -395,6 +395,7 @@ static void test_snapshot_temporarily_unavailable_retries(void) {
     elect_with_two_voters(node, &storage);
     reject_compacted_append(node);
     assert(storage.snapshot_calls == 1);
+    assert(raft_raw_node_error(node) == RAFT_OK);
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
     assert(find_message(ready, RAFT_MSG_SNAP, 2) == NULL);
     raft_ready_destroy(ready);
@@ -414,6 +415,7 @@ static void test_snapshot_temporarily_unavailable_retries(void) {
                    .context = {NULL, 0, true},
                }) == RAFT_OK);
     assert(storage.snapshot_calls == 2);
+    assert(raft_raw_node_error(node) == RAFT_OK);
     assert(raft_raw_node_ready_without_accept(node, &ready) == RAFT_OK);
     assert(find_message(ready, RAFT_MSG_SNAP, 2) != NULL);
     raft_ready_destroy(ready);

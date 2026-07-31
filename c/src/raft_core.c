@@ -50,8 +50,12 @@ static bool core_hard_state_empty(const raft_hard_state_t *state) {
 }
 
 bool raft_result_is_terminal(int result) {
+    // Expected storage conditions are consumed at their operation-specific
+    // call sites. In particular, core_maybe_send_snapshot converts temporary
+    // Snapshot unavailability to RAFT_OK before a result reaches this latch.
     return result == RAFT_ERR_STORAGE_COMPACTED ||
            result == RAFT_ERR_STORAGE_UNAVAILABLE ||
+           result == RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE ||
            result == RAFT_ERR_PANIC_FROM_GO_CALLBACK ||
            result == RAFT_ERR_OUT_OF_MEMORY ||
            result == RAFT_ERR_FATAL;

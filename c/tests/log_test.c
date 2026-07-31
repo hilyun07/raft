@@ -535,6 +535,11 @@ static void test_storage_error_classification(void) {
     assert(raft_log_is_up_to_date(
                &log, 1, 1, &value) == RAFT_ERR_FATAL);
     assert(!value);
+    storage.term_error =
+        RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE;
+    assert(raft_log_match_term(&log, 1, 1, &value) ==
+           RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
+    assert(!value);
 
     storage.term_error = RAFT_OK;
     storage.entries_error = RAFT_ERR_STORAGE_UNAVAILABLE;
@@ -544,6 +549,11 @@ static void test_storage_error_classification(void) {
     storage.entries_error = RAFT_ERR_STORAGE_COMPACTED;
     assert(raft_log_slice(&log, 1, 2, UINT64_MAX, &out) ==
            RAFT_ERR_STORAGE_COMPACTED);
+    raft_entry_vec_free(&out);
+    storage.entries_error =
+        RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE;
+    assert(raft_log_slice(&log, 1, 2, UINT64_MAX, &out) ==
+           RAFT_ERR_SNAPSHOT_TEMPORARILY_UNAVAILABLE);
     raft_entry_vec_free(&out);
 
     raft_log_free(&log);

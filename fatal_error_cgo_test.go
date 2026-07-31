@@ -214,3 +214,59 @@ func TestCGoBootstrapStorageErrorRemainsRecoverableBeforeMutation(
 		t.Fatalf("Bootstrap after recoverable storage error: %v", err)
 	}
 }
+
+func TestCGoSnapshotTemporaryTermFailureStaysTerminal(t *testing.T) {
+	storage := fatalStorageParityWithSnapshot(t, 1)
+	rn, err := NewRawNode(fatalStorageParityConfig(storage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rn.destroy()
+	storage.termErr = ErrSnapshotTemporarilyUnavailable
+
+	if recovered := cgoCapturePanic(func() {
+		_ = rn.Step(fatalStorageParityVote())
+	}); recovered == nil {
+		t.Fatal("Storage.Term snapshot-temporary error did not panic")
+	}
+	storage.termErr = nil
+	if recovered := cgoCapturePanic(func() {
+		_ = rn.Campaign()
+	}); recovered == nil {
+		t.Fatal("Storage.Term snapshot-temporary error was not sticky")
+	}
+}
+
+func TestCGoSnapshotTemporaryEntriesFailureStaysTerminal(t *testing.T) {
+	storage := fatalStorageParityWithSnapshot(t, 1)
+	if err := storage.Append([]*pb.Entry{{
+		Term:  new(uint64(1)),
+		Index: new(uint64(2)),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.SetHardState(&pb.HardState{
+		Term:   new(uint64(1)),
+		Commit: new(uint64(2)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rn, err := NewRawNode(fatalStorageParityConfig(storage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rn.destroy()
+	storage.entriesErr = ErrSnapshotTemporarilyUnavailable
+
+	if recovered := cgoCapturePanic(func() {
+		_ = rn.Ready()
+	}); recovered == nil {
+		t.Fatal("Storage.Entries snapshot-temporary error did not panic")
+	}
+	storage.entriesErr = nil
+	if recovered := cgoCapturePanic(func() {
+		_ = rn.Campaign()
+	}); recovered == nil {
+		t.Fatal("Storage.Entries snapshot-temporary error was not sticky")
+	}
+}
