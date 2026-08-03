@@ -2,3 +2,6 @@
 .gocache
 .gocache/*
 c/.build/
+c/.build-sanitize/
+rafttest_c/.build/
+rafttest_c/.build-sanitize/

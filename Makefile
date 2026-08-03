@@ -30,10 +30,16 @@ test:
 .PHONY: test-c
 test-c:
 	$(MAKE) -C c test
+	$(MAKE) -C rafttest_c test
+
+.PHONY: test-c-multinode
+test-c-multinode:
+	$(MAKE) -C rafttest_c test
 
 .PHONY: test-c-sanitize
 test-c-sanitize:
 	$(MAKE) -C c test-sanitize
+	$(MAKE) -C rafttest_c test-sanitize
 
 .PHONY: test-cgo-raft
 test-cgo-raft:
@@ -42,3 +48,6 @@ test-cgo-raft:
 .PHONY: clean-c
 clean-c:
 	$(MAKE) -C c clean
+	$(MAKE) -C c clean BUILD_DIR=.build-sanitize
+	$(MAKE) -C rafttest_c clean
+	$(MAKE) -C rafttest_c clean BUILD_DIR=.build-sanitize

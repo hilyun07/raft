@@ -9,6 +9,7 @@ PRIVATE_INCLUDE := src
 WARNINGS := -Wall -Wextra -Werror -Wpedantic
 STANDARD := -std=c11
 SANITIZER_CFLAGS ?= -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
+SANITIZER_BUILD_DIR ?= .build-sanitize
 
 LIBRARY := $(BUILD_DIR)/libraft_c.a
 OBJECTS := \
@@ -127,10 +128,11 @@ test: $(TEST_BINARIES)
 
 .PHONY: test-sanitize
 test-sanitize:
-	$(MAKE) clean
+	$(MAKE) clean BUILD_DIR='$(SANITIZER_BUILD_DIR)'
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
 	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
-	$(MAKE) test CFLAGS='$(SANITIZER_CFLAGS)'
+	$(MAKE) test BUILD_DIR='$(SANITIZER_BUILD_DIR)' \
+		CFLAGS='$(SANITIZER_CFLAGS)'
 
 .PHONY: clean
 clean:
