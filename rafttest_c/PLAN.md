@@ -52,6 +52,14 @@ CGO_ENABLED=1 go test -tags=cgo_raft \
 기준점이다. `rafttest_c`는 여기서 더 나아가 Go actor와 cgo 변환에
 의존하지 않고 공개 C API만으로 같은 시나리오를 검증한다.
 
+현재는 `rafttest/node_test.go`의 동일한 Go frontend도 `cgo_raft` 빌드에
+포함된다. 따라서 두 경로를 함께 유지한다.
+
+```text
+make test-cgo-raft  -> Go Node frontend -> cgo -> C RawNode
+make test-c         -> native C harness -> C RawNode
+```
+
 ## 3. Go 하네스와 C 하네스의 대응
 
 ```text
